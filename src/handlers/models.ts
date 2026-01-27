@@ -8,27 +8,17 @@ import type { Context } from "hono";
 /** 可用的模型列表 */
 const AVAILABLE_MODELS = [
   {
-    id: "claude-sonnet-4-20250514",
+    id: "claude-opus-4-5",
     object: "model",
     owned_by: "anthropic",
   },
   {
-    id: "claude-opus-4-20250514",
+    id: "claude-sonnet-4-5",
     object: "model",
     owned_by: "anthropic",
   },
   {
-    id: "claude-3-5-sonnet-20241022",
-    object: "model",
-    owned_by: "anthropic",
-  },
-  {
-    id: "claude-3-5-haiku-20241022",
-    object: "model",
-    owned_by: "anthropic",
-  },
-  {
-    id: "claude-3-opus-20240229",
+    id: "claude-haiku-4-5",
     object: "model",
     owned_by: "anthropic",
   },

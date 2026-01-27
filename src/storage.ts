@@ -35,9 +35,10 @@ export interface Config {
 const DEFAULT_CONFIG: Config = {
   modelMapping: {
     // OpenAI 模型映射
-    "gpt-4": "claude-sonnet-4-20250514",
-    "gpt-4-turbo": "claude-sonnet-4-20250514",
-    "gpt-4o": "claude-sonnet-4-20250514",
+    "gpt-5.2-codex": "claude-opus-4-5",
+    "gpt-5.2": "claude-sonnet-4-5",
+    "gpt-5.1-codex-max": "claude-haiku-4-5",
+    "gpt-5.1-codex-mini": "claude-haiku-4-5",
   },
   server: {
     port: 3456,
@@ -122,8 +123,9 @@ export function getDefaultConfig(): Config {
  * 格式: sk-ccproxy-xxxxxxxxxxxxxxxxxxxx (32位随机字符)
  */
 export function generateApiKey(): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let randomPart = '';
+  const chars =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let randomPart = "";
   const array = new Uint8Array(32);
   crypto.getRandomValues(array);
   for (let i = 0; i < 32; i++) {
