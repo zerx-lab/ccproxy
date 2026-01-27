@@ -37,6 +37,8 @@ export function createChatCompletionsHandler(
         stop,
         temperature,
         top_p,
+        parallel_tool_calls,
+        prompt_cache_key, // OpenAI 缓存参数，映射到 Anthropic cacheControl
         ...rest
       } = body;
 
@@ -131,6 +133,21 @@ export function createChatCompletionsHandler(
             topP: top_p,
             maxOutputTokens: maxTokens,
             stopSequences,
+            // 传递 Anthropic provider 选项
+            providerOptions: {
+              anthropic: {
+                // parallel_tool_calls: true (OpenAI) -> disableParallelToolUse: false (Anthropic)
+                // parallel_tool_calls: false (OpenAI) -> disableParallelToolUse: true (Anthropic)
+                ...(parallel_tool_calls !== undefined && {
+                  disableParallelToolUse: !parallel_tool_calls,
+                }),
+                // 当有 prompt_cache_key 时，启用 Anthropic 缓存
+                // 注意：OpenAI 和 Anthropic 的缓存机制不同，这是一个近似映射
+                ...(prompt_cache_key && {
+                  cacheControl: { type: "ephemeral" as const },
+                }),
+              },
+            },
             // 添加 onError 回调来捕获流式错误（AI SDK 6.x 会抑制错误以防止服务器崩溃）
             onError({ error }) {
               console.error("[chat-completions] Stream error captured:", error);
@@ -313,6 +330,17 @@ export function createChatCompletionsHandler(
           topP: top_p,
           maxOutputTokens: maxTokens,
           stopSequences,
+          // 传递 Anthropic provider 选项
+          providerOptions: {
+            anthropic: {
+              ...(parallel_tool_calls !== undefined && {
+                disableParallelToolUse: !parallel_tool_calls,
+              }),
+              ...(prompt_cache_key && {
+                cacheControl: { type: "ephemeral" as const },
+              }),
+            },
+          },
         });
 
         const text = await result.text;
