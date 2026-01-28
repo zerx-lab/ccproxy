@@ -37,6 +37,12 @@ export interface ResponsesAPIRequest {
   };
   truncation?: "auto" | "disabled";
   parallel_tool_calls?: boolean;
+  // 缓存相关参数
+  prompt_cache_key?: string;
+  // 状态存储（OpenAI 特有，当前不完全支持）
+  store?: boolean;
+  // 服务层级（OpenAI 特有，会被忽略）
+  service_tier?: string;
 }
 
 export interface ResponseInputItem {
@@ -127,10 +133,21 @@ export interface ChatCompletionsRequest {
   model: string;
   messages: ChatMessage[];
   tools?: OpenAITool[];
+  tool_choice?: "none" | "auto" | "required" | { type: "function"; function: { name: string } };
   stream?: boolean;
   temperature?: number;
   top_p?: number;
   max_tokens?: number;
+  max_completion_tokens?: number;
+  stop?: string | string[];
+  parallel_tool_calls?: boolean;
+  // 缓存相关参数（OpenAI 特有，会映射到 Anthropic cacheControl）
+  prompt_cache_key?: string;
+  // 预测输出参数（OpenAI 特有，Anthropic 不支持，会被忽略）
+  prediction?: {
+    type: "content";
+    content: string;
+  };
   [key: string]: any;
 }
 

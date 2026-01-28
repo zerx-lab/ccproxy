@@ -33,6 +33,8 @@ export function createResponsesHandler(
         instructions,
         tools: openaiTools,
         stream = false,
+        parallel_tool_calls,
+        prompt_cache_key, // 缓存参数
         ...rest
       } = body;
 
@@ -126,6 +128,20 @@ export function createResponsesHandler(
             temperature: rest.temperature,
             topP: rest.top_p,
             maxOutputTokens: rest.max_output_tokens || 8192,
+            // 传递 Anthropic provider 选项
+            providerOptions: {
+              anthropic: {
+                // parallel_tool_calls: true (OpenAI) -> disableParallelToolUse: false (Anthropic)
+                // parallel_tool_calls: false (OpenAI) -> disableParallelToolUse: true (Anthropic)
+                ...(parallel_tool_calls !== undefined && {
+                  disableParallelToolUse: !parallel_tool_calls,
+                }),
+                // 当有 prompt_cache_key 时，启用 Anthropic 缓存
+                ...(prompt_cache_key && {
+                  cacheControl: { type: "ephemeral" as const },
+                }),
+              },
+            },
           });
         } catch (initError) {
           // 初始化错误 - 返回 SSE 格式的错误响应
@@ -448,6 +464,17 @@ export function createResponsesHandler(
           temperature: rest.temperature,
           topP: rest.top_p,
           maxOutputTokens: rest.max_output_tokens || 8192,
+          // 传递 Anthropic provider 选项
+          providerOptions: {
+            anthropic: {
+              ...(parallel_tool_calls !== undefined && {
+                disableParallelToolUse: !parallel_tool_calls,
+              }),
+              ...(prompt_cache_key && {
+                cacheControl: { type: "ephemeral" as const },
+              }),
+            },
+          },
         });
 
         const text = await result.text;
