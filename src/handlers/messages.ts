@@ -142,7 +142,9 @@ async function handleMessagesInternal(
       });
     }
 
-    const processedBody = processClaudeCodeRequestBody(parsed);
+    const processedBody = processClaudeCodeRequestBody(parsed, {
+      forceAddPlaceholderTool: false, // 与 AI SDK 保持一致，不强制添加 placeholder 工具
+    });
 
     const response = await sendClaudeCodeRequest(
       accessToken,
