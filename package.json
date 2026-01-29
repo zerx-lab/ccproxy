@@ -28,6 +28,7 @@
     "ai": "^6.0.50",
     "commander": "^14.0.2",
     "hono": "^4.11.6",
+    "langfuse": "^3.38.6",
     "opencode-anthropic-auth": "^0.0.11"
   }
 }

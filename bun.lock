@@ -11,6 +11,7 @@
         "ai": "^6.0.50",
         "commander": "^14.0.2",
         "hono": "^4.11.6",
+        "langfuse": "^3.38.6",
         "opencode-anthropic-auth": "^0.0.11",
       },
       "devDependencies": {
@@ -71,6 +72,12 @@
     "jose": ["jose@5.9.6", "", {}, "sha512-AMlnetc9+CV9asI19zHmrgS/WYsWUwCn2R7RzlbJWD7F9eWYUTGyBmU9o6PxngtLGOiDGPRu+Uc4fhKzbpteZQ=="],
 
     "json-schema": ["json-schema@0.4.0", "", {}, "sha512-es94M3nTIfsEPisRafak+HDLfHXnKBhV3vU5eqPcS3flIWqcxJWgXHXiey3YrpaNsanY5ei1VoYEbOzijuq9BA=="],
+
+    "langfuse": ["langfuse@3.38.6", "", { "dependencies": { "langfuse-core": "^3.38.6" } }, "sha512-mtwfsNGIYvObRh+NYNGlJQJDiBN+Wr3Hnr++wN25mxuOpSTdXX+JQqVCyAqGL5GD2TAXRZ7COsN42Vmp9krYmg=="],
+
+    "langfuse-core": ["langfuse-core@3.38.6", "", { "dependencies": { "mustache": "^4.2.0" } }, "sha512-EcZXa+DK9FJdi1I30+u19eKjuBJ04du6j2Nybk19KKCuraLczg/ppkTQcGvc4QOk//OAi3qUHrajUuV74RXsBQ=="],
+
+    "mustache": ["mustache@4.2.0", "", { "bin": { "mustache": "bin/mustache" } }, "sha512-71ippSywq5Yb7/tVYyGbkBggbU8H3u5Rz56fH60jGFgr8uHwxs+aSKeqmluIVzM0m0kB7xQjKS6qPfd0b2ZoqQ=="],
 
     "opencode-anthropic-auth": ["opencode-anthropic-auth@0.0.11", "", { "dependencies": { "@openauthjs/openauth": "^0.4.3" } }, "sha512-VvlzHeYMTuHGTayF1P4tlqLMdPjy5O0HiVStsHcWpRale2K0KevQNXc8E9v2PVnYIdoUVyhR37q/luycBHL/cQ=="],
 

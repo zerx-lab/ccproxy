@@ -15,6 +15,15 @@ import {
 } from "../utils/openai-converter";
 import { getValidAccessToken } from "../auth";
 import type { ResponsesAPIRequest, ResponsesAPIResponse } from "../types";
+import {
+  createTrace,
+  updateTrace,
+  createGeneration,
+  endGeneration,
+  flushLangfuse,
+  isLangfuseEnabled,
+} from "../langfuse";
+import { sessionManager } from "../session-manager";
 
 /**
  * 处理 Responses API 请求
@@ -24,8 +33,41 @@ export function createResponsesHandler(
 ) {
   return async (c: Context) => {
     const endpoint = "/v1/responses";
+    let sessionId: string | null = null;
+
+    // Langfuse tracing
+    const trace = isLangfuseEnabled()
+      ? createTrace({
+          name: "responses",
+          metadata: {
+            endpoint,
+            userAgent: c.req.header("user-agent"),
+          },
+        })
+      : null;
+    let generation: ReturnType<typeof createGeneration> | null = null;
+
     try {
       const body = (await c.req.json()) as ResponsesAPIRequest;
+
+      // 会话管理：提取会话 ID 并检查是否可以处理请求
+      // Responses API 使用 input 而不是 messages
+      const sessionBody = { input: body.input };
+      sessionId = sessionManager.extractSessionId(sessionBody);
+      const requestStatus = sessionManager.startRequest(sessionId, body);
+
+      if (!requestStatus.accepted) {
+        console.warn(`[responses] Request rejected: ${requestStatus.reason}`);
+        return c.json(
+          {
+            error: {
+              code: "rate_limit_error",
+              message: requestStatus.reason,
+            },
+          },
+          429
+        );
+      }
       logRequest(endpoint, "POST", body);
       const {
         model,
@@ -40,6 +82,46 @@ export function createResponsesHandler(
 
       // 映射模型名称
       const modelId = mapModelName(model);
+
+      // 更新 trace 的 input
+      if (trace) {
+        updateTrace(trace, {
+          input: {
+            input,
+            instructions,
+            tools: openaiTools,
+            tool_choice: body.tool_choice,
+            model,
+            temperature: rest.temperature,
+            top_p: rest.top_p,
+            max_output_tokens: rest.max_output_tokens,
+            stream,
+          },
+        });
+      }
+
+      // 创建 Langfuse generation
+      if (trace) {
+        generation = createGeneration({
+          trace,
+          name: "llm-call",
+          model: modelId,
+          input: {
+            input,
+            instructions,
+            tools: openaiTools,
+            tool_choice: body.tool_choice,
+            temperature: rest.temperature,
+            top_p: rest.top_p,
+            max_output_tokens: rest.max_output_tokens,
+            stream,
+          },
+          metadata: {
+            originalModel: model,
+            mappedModel: modelId,
+          },
+        });
+      }
 
       // 转换 input 为 AI SDK messages 格式
       const { messages, system } = convertResponsesInputToAISDK(
@@ -76,7 +158,37 @@ export function createResponsesHandler(
           : undefined;
 
       // 转换 tool_choice
-      const toolChoice = convertToolChoice(body.tool_choice);
+      let toolChoice = convertToolChoice(body.tool_choice);
+
+      // 验证 tools 和 toolChoice 的组合
+      // 如果没有 tools，toolChoice 应该是 undefined 或 "none"
+      if (!aiSdkTools || Object.keys(aiSdkTools).length === 0) {
+        if (toolChoice && toolChoice !== "none") {
+          console.warn(
+            `[responses] No tools provided but toolChoice is "${JSON.stringify(toolChoice)}", setting to undefined`,
+          );
+          toolChoice = undefined;
+        }
+      }
+
+      // 如果 toolChoice 指定了特定工具，验证该工具存在
+      if (
+        aiSdkTools &&
+        typeof toolChoice === "object" &&
+        toolChoice?.type === "tool" &&
+        toolChoice?.toolName
+      ) {
+        if (!aiSdkTools[toolChoice.toolName]) {
+          console.warn(
+            `[responses] toolChoice specifies non-existent tool "${toolChoice.toolName}", available tools: [${Object.keys(aiSdkTools).join(", ")}], setting to "auto"`,
+          );
+          toolChoice = "auto";
+        }
+      }
+
+      console.log(
+        `[responses] Final toolChoice: ${JSON.stringify(toolChoice)}, tools count: ${aiSdkTools ? Object.keys(aiSdkTools).length : 0}`,
+      );
 
       // 创建带认证的 Anthropic 客户端
       const anthropic = createAnthropic({
@@ -426,6 +538,36 @@ export function createResponsesHandler(
                 }
               }
 
+              // 流式响应完成，更新 trace output 并结束 Langfuse generation
+              const streamOutput = {
+                text: fullText,
+                tool_calls: toolCalls,
+              };
+
+              if (trace) {
+                updateTrace(trace, { output: streamOutput });
+              }
+
+              if (generation) {
+                const usage = await result.usage;
+                // AI SDK v6 使用 inputTokens/outputTokens
+                endGeneration({
+                  generation,
+                  output: streamOutput,
+                  usage: {
+                    promptTokens: (usage as any)?.inputTokens || 0,
+                    completionTokens: (usage as any)?.outputTokens || 0,
+                    totalTokens: (usage as any)?.totalTokens || 0,
+                  },
+                });
+                flushLangfuse();
+              }
+
+              // 结束会话跟踪
+              if (sessionId) {
+                sessionManager.endRequest(sessionId);
+              }
+
               controller.close();
             } catch (error) {
               // 流式处理中的错误 - 发送 SSE 格式的错误响应而不是断开连接
@@ -433,6 +575,23 @@ export function createResponsesHandler(
               const errorMessage =
                 error instanceof Error ? error.message : "Unknown error";
               logError(endpoint, "POST", error);
+
+              // 结束会话跟踪
+              if (sessionId) {
+                sessionManager.endRequest(sessionId);
+              }
+
+              // 错误时结束 Langfuse generation
+              if (generation) {
+                endGeneration({
+                  generation,
+                  output: { error: errorMessage },
+                  level: "ERROR",
+                  statusMessage: errorMessage,
+                });
+                flushLangfuse();
+              }
+
               try {
                 controller.enqueue(
                   encoder.encode(createSSEErrorResponse(errorMessage)),
@@ -540,9 +699,53 @@ export function createResponsesHandler(
           reasoning: body.reasoning,
         };
 
+        // 非流式响应完成，更新 trace output 并结束 Langfuse generation
+        const responseOutput = {
+          text,
+          tool_calls: toolCalls,
+        };
+
+        if (trace) {
+          updateTrace(trace, { output: responseOutput });
+        }
+
+        if (generation) {
+          // AI SDK v6 使用 inputTokens/outputTokens
+          endGeneration({
+            generation,
+            output: responseOutput,
+            usage: {
+              promptTokens: (usage as any).inputTokens || 0,
+              completionTokens: (usage as any).outputTokens || 0,
+              totalTokens: (usage as any).totalTokens || 0,
+            },
+          });
+          flushLangfuse();
+        }
+
+        // 结束会话跟踪
+        if (sessionId) {
+          sessionManager.endRequest(sessionId);
+        }
+
         return c.json(formattedResponse);
       }
     } catch (error) {
+      // 结束会话跟踪
+      if (sessionId) {
+        sessionManager.endRequest(sessionId);
+      }
+
+      // 错误时结束 Langfuse generation
+      if (generation) {
+        endGeneration({
+          generation,
+          output: { error: error instanceof Error ? error.message : "Unknown error" },
+          level: "ERROR",
+          statusMessage: error instanceof Error ? error.message : "Unknown error",
+        });
+        flushLangfuse();
+      }
       logError(endpoint, "POST", error);
       return c.json(
         {

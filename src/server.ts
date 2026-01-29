@@ -19,6 +19,7 @@ import {
   onApiKeyChange,
 } from "./config-watcher";
 import type { ProxyOptions } from "./types";
+import { isLangfuseEnabled, shutdownLangfuse } from "./langfuse";
 
 // 当前配置引用（用于动态更新）
 let modelMapping: Record<string, string> = {};
@@ -99,11 +100,13 @@ export async function startServer(options: ProxyOptions) {
   console.log(`  - GET  /health`);
   console.log(`Logs directory: ${getLogDir()}`);
   console.log(`Hot reload: ENABLED (config files are watched)`);
+  console.log(`Langfuse tracing: ${isLangfuseEnabled() ? "ENABLED" : "DISABLED"}`);
 
   // 处理进程退出
-  const cleanup = () => {
+  const cleanup = async () => {
     console.log("\nShutting down...");
     stopConfigWatcher();
+    await shutdownLangfuse();
     process.exit(0);
   };
 

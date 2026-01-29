@@ -51,9 +51,10 @@ export function convertChatMessagesToAISDK(messages: any[]): {
           content = msg.content;
         } else if (Array.isArray(msg.content)) {
           // 转换多模态内容
+          // 注意：Anthropic API 要求 text 内容块必须包含非空白文本
           const parts: any[] = [];
           for (const part of msg.content) {
-            if (part.type === "text" && part.text) {
+            if (part.type === "text" && part.text && part.text.trim()) {
               parts.push({ type: "text", text: part.text });
             } else if (part.type === "image_url" && part.image_url) {
               // OpenAI 图片格式 -> AI SDK 格式
@@ -77,12 +78,13 @@ export function convertChatMessagesToAISDK(messages: any[]): {
         const contentParts: any[] = [];
 
         // 处理文本内容（可能是 null、undefined、字符串或数组）
+        // 注意：Anthropic API 要求 text 内容块必须包含非空白文本
         if (msg.content) {
-          if (typeof msg.content === "string") {
+          if (typeof msg.content === "string" && msg.content.trim()) {
             contentParts.push({ type: "text", text: msg.content });
           } else if (Array.isArray(msg.content)) {
             for (const part of msg.content) {
-              if (part.type === "text" && part.text) {
+              if (part.type === "text" && part.text && part.text.trim()) {
                 contentParts.push({ type: "text", text: part.text });
               }
             }
@@ -179,22 +181,93 @@ export function convertChatMessagesToAISDK(messages: any[]): {
 
 /**
  * 转换 OpenAI tool_choice 到 AI SDK 格式
+ *
+ * OpenAI 格式:
+ *   - "none" | "auto" | "required"
+ *   - { type: "function", function: { name: "xxx" } }  // 强制调用特定工具
+ *   - { type: "function" }  // 等同于 "required"
+ *   - { type: "any" }  // 等同于 "required" (某些客户端可能使用)
+ *
+ * AI SDK 格式:
+ *   - "none" | "auto" | "required"
+ *   - { type: "tool", toolName: "xxx" }
  */
 export function convertToolChoice(toolChoice: any): any {
   if (!toolChoice) return undefined;
 
-  // OpenAI: "none" | "auto" | "required" | { type: "function", function: { name: "xxx" } }
-  // AI SDK: "none" | "auto" | "required" | { type: "tool", toolName: "xxx" }
-
+  // 字符串格式：直接返回
   if (typeof toolChoice === "string") {
-    return toolChoice; // "none" | "auto" | "required"
+    // 确保是有效的字符串值
+    if (["none", "auto", "required"].includes(toolChoice)) {
+      return toolChoice;
+    }
+    // 某些客户端可能发送 "any"，映射到 "required"
+    if (toolChoice === "any") {
+      console.log(
+        `[convertToolChoice] Mapping "any" to "required"`,
+      );
+      return "required";
+    }
+    console.warn(
+      `[convertToolChoice] Unknown string tool_choice: "${toolChoice}", defaulting to "auto"`,
+    );
+    return "auto";
   }
 
-  if (toolChoice.type === "function" && toolChoice.function?.name) {
-    return { type: "tool", toolName: toolChoice.function.name };
+  // 对象格式
+  if (typeof toolChoice === "object") {
+    // { type: "function", function: { name: "xxx" } } -> { type: "tool", toolName: "xxx" }
+    if (toolChoice.type === "function" && toolChoice.function?.name) {
+      return { type: "tool", toolName: toolChoice.function.name };
+    }
+
+    // { type: "function" } (没有 function.name) -> "required"
+    if (toolChoice.type === "function" && !toolChoice.function?.name) {
+      console.log(
+        `[convertToolChoice] Converting { type: "function" } (no name) to "required"`,
+      );
+      return "required";
+    }
+
+    // { type: "any" } -> "required"
+    if (toolChoice.type === "any") {
+      console.log(
+        `[convertToolChoice] Converting { type: "any" } to "required"`,
+      );
+      return "required";
+    }
+
+    // { type: "none" } -> "none"
+    if (toolChoice.type === "none") {
+      return "none";
+    }
+
+    // { type: "auto" } -> "auto"
+    if (toolChoice.type === "auto") {
+      return "auto";
+    }
+
+    // { type: "required" } -> "required"
+    if (toolChoice.type === "required") {
+      return "required";
+    }
+
+    // 未知对象格式，记录警告并返回 "auto"
+    console.warn(
+      `[convertToolChoice] Unknown object tool_choice format:`,
+      JSON.stringify(toolChoice),
+      `defaulting to "auto"`,
+    );
+    return "auto";
   }
 
-  return undefined;
+  console.warn(
+    `[convertToolChoice] Unexpected tool_choice type:`,
+    typeof toolChoice,
+    toolChoice,
+    `defaulting to "auto"`,
+  );
+  return "auto";
 }
 
 /**
@@ -207,21 +280,65 @@ export function convertOpenAIToolsToAISDK(
 ): Record<string, any> {
   const aiSdkTools: Record<string, any> = {};
 
-  for (const t of openaiTools) {
-    // OpenAI 格式: { type: "function", function: { name, description, parameters } }
-    const func = t.function || t;
-    const name = func.name || t.name;
-    const description = func.description || t.description || "";
-    const parameters = func.parameters ||
-      t.parameters || { type: "object", properties: {} };
+  console.log(
+    `[convertOpenAIToolsToAISDK] Converting ${openaiTools.length} tools`,
+  );
 
-    if (name) {
+  for (let i = 0; i < openaiTools.length; i++) {
+    const t = openaiTools[i];
+    try {
+      // OpenAI 格式: { type: "function", function: { name, description, parameters } }
+      // 或者简化格式: { name, description, parameters }
+      const func = t.function || t;
+      const name = func.name || t.name;
+      const description = func.description || t.description || "";
+
+      if (!name) {
+        console.warn(
+          `[convertOpenAIToolsToAISDK] Tool at index ${i} has no name, skipping:`,
+          JSON.stringify(t).substring(0, 200),
+        );
+        continue;
+      }
+
+      // 确保 parameters 是有效的 JSON Schema
+      let parameters = func.parameters || t.parameters;
+
+      // 如果没有 parameters，使用空对象 schema
+      if (!parameters) {
+        parameters = { type: "object", properties: {} };
+      }
+
+      // 确保 parameters 有 type 字段（JSON Schema 要求）
+      if (!parameters.type) {
+        parameters = { type: "object", ...parameters };
+      }
+
+      // 确保 object 类型有 properties 字段
+      if (parameters.type === "object" && !parameters.properties) {
+        parameters.properties = {};
+      }
+
       aiSdkTools[name] = tool({
         description,
         inputSchema: jsonSchema(parameters),
       });
+
+      console.log(
+        `[convertOpenAIToolsToAISDK] Converted tool: ${name}`,
+      );
+    } catch (error) {
+      console.error(
+        `[convertOpenAIToolsToAISDK] Failed to convert tool at index ${i}:`,
+        error,
+        JSON.stringify(t).substring(0, 500),
+      );
     }
   }
+
+  console.log(
+    `[convertOpenAIToolsToAISDK] Successfully converted ${Object.keys(aiSdkTools).length} tools`,
+  );
 
   return aiSdkTools;
 }
@@ -384,11 +501,12 @@ export function convertResponsesInputToAISDK(
           }
 
           // 现在处理当前 assistant 消息的内容
+          // 注意：Anthropic API 要求 text 内容块必须包含非空白文本
           if (Array.isArray(item.content)) {
             for (const part of item.content) {
-              if (part.type === "output_text" && part.text) {
+              if (part.type === "output_text" && part.text && part.text.trim()) {
                 contentParts.push({ type: "text", text: part.text });
-              } else if (part.type === "text" && part.text) {
+              } else if (part.type === "text" && part.text && part.text.trim()) {
                 contentParts.push({ type: "text", text: part.text });
               }
             }
@@ -500,19 +618,20 @@ export function convertResponsesInputToAISDK(
             content = item.content;
           } else if (Array.isArray(item.content)) {
             // 转换 content parts，过滤空内容
+            // 注意：Anthropic API 要求 text 内容块必须包含非空白文本
             const parts: Array<{
               type: string;
               text?: string;
               image?: string;
             }> = [];
             for (const part of item.content as any[]) {
-              if (part.type === "input_text" && part.text) {
+              if (part.type === "input_text" && part.text && part.text.trim()) {
                 parts.push({ type: "text", text: part.text });
               } else if (part.type === "input_image" && part.image_url) {
                 parts.push({ type: "image", image: part.image_url });
-              } else if (part.type === "text" && part.text) {
+              } else if (part.type === "text" && part.text && part.text.trim()) {
                 parts.push({ type: "text", text: part.text });
-              } else if (part.type === "output_text" && part.text) {
+              } else if (part.type === "output_text" && part.text && part.text.trim()) {
                 // 处理 output_text（可能来自历史响应）
                 parts.push({ type: "text", text: part.text });
               }

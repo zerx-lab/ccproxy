@@ -96,7 +96,7 @@ export async function exchange(
 /**
  * 刷新 access token
  */
-export async function refreshToken(refreshToken: string): Promise<ExchangeResult> {
+export async function refreshToken(refreshTokenValue: string): Promise<ExchangeResult> {
   const response = await fetch("https://console.anthropic.com/v1/oauth/token", {
     method: "POST",
     headers: {
@@ -104,7 +104,7 @@ export async function refreshToken(refreshToken: string): Promise<ExchangeResult
     },
     body: JSON.stringify({
       grant_type: "refresh_token",
-      refresh_token: refreshToken,
+      refresh_token: refreshTokenValue,
       client_id: CLIENT_ID,
     }),
   });
@@ -123,22 +123,32 @@ export async function refreshToken(refreshToken: string): Promise<ExchangeResult
 }
 
 /**
- * 获取有效的 access token，如果过期则自动刷新
+ * 获取当前的 access token（不主动刷新，类似 opencode 的被动刷新方式）
+ * 如果 token 不存在返回 null
  */
 export async function getValidAccessToken(): Promise<string | null> {
   const auth = await loadAuth();
   if (!auth) {
     return null;
   }
+  return auth.access;
+}
 
-  // 如果 token 还有效（提前 5 分钟刷新）
-  if (auth.expires > Date.now() + 5 * 60 * 1000) {
-    return auth.access;
+/**
+ * 强制刷新 access token（在收到 401 错误时调用）
+ * 返回新的 access token，如果刷新失败返回 null
+ */
+export async function forceRefreshAccessToken(): Promise<string | null> {
+  const auth = await loadAuth();
+  if (!auth) {
+    return null;
   }
 
-  // 需要刷新 token
+  console.log(`[${new Date().toISOString()}] Refreshing access token due to 401 error...`);
+
   const result = await refreshToken(auth.refresh);
   if (result.type === "failed") {
+    console.error(`[${new Date().toISOString()}] Failed to refresh access token`);
     return null;
   }
 
@@ -151,5 +161,6 @@ export async function getValidAccessToken(): Promise<string | null> {
   };
   await saveAuth(newAuth);
 
+  console.log(`[${new Date().toISOString()}] Access token refreshed successfully`);
   return result.access;
 }
