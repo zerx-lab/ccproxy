@@ -39,19 +39,20 @@ function hasToolPrefix(name: string): boolean {
 }
 
 /**
- * 检查系统消息中是否已经包含 Claude Code 标识
+ * 检查系统消息中是否已经包含完全相同的 Claude Code 系统提示词
+ * 注意：必须精确匹配 CLAUDE_CODE_SYSTEM_PROMPT，而不是模糊匹配
  */
-function hasClaudeCodeSystemPrompt(system: any): boolean {
+function hasExactClaudeCodeSystemPrompt(system: any): boolean {
   if (!system) return false;
   if (typeof system === "string") {
-    return system.includes("Claude Code");
+    return system === CLAUDE_CODE_SYSTEM_PROMPT;
   }
   if (Array.isArray(system)) {
     return system.some(
       (item) =>
         typeof item === "string"
-          ? item.includes("Claude Code")
-          : item?.text?.includes("Claude Code")
+          ? item === CLAUDE_CODE_SYSTEM_PROMPT
+          : item?.text === CLAUDE_CODE_SYSTEM_PROMPT
     );
   }
   return false;
@@ -76,27 +77,23 @@ export function processClaudeCodeRequestBody(
 
   // 1. 添加 Claude Code system prompt（始终使用数组格式以匹配 Claude Code 实际格式）
   // 同时添加 cache_control 标记以启用 prompt 缓存
-  // 注意：检查是否已经包含 Claude Code 标识，避免重复添加
+  // 注意：检查是否已经包含完全相同的 Claude Code 系统提示词，避免重复添加
   const cacheControl = opts.enablePromptCache
     ? { cache_control: { type: "ephemeral" } }
     : {};
 
-  if (!hasClaudeCodeSystemPrompt(parsed.system)) {
+  if (!hasExactClaudeCodeSystemPrompt(parsed.system)) {
+    const claudeCodeSystemBlock = { type: "text", text: CLAUDE_CODE_SYSTEM_PROMPT, ...cacheControl };
+    
     if (!parsed.system) {
-      parsed.system = [
-        { type: "text", text: CLAUDE_CODE_SYSTEM_PROMPT, ...cacheControl },
-      ];
+      parsed.system = [claudeCodeSystemBlock];
     } else if (typeof parsed.system === "string") {
       parsed.system = [
-        { type: "text", text: CLAUDE_CODE_SYSTEM_PROMPT, ...cacheControl },
+        claudeCodeSystemBlock,
         { type: "text", text: parsed.system },
       ];
     } else if (Array.isArray(parsed.system)) {
-      // 给第一个系统消息添加缓存标记
-      parsed.system = [
-        { type: "text", text: CLAUDE_CODE_SYSTEM_PROMPT, ...cacheControl },
-        ...parsed.system,
-      ];
+      parsed.system = [claudeCodeSystemBlock, ...parsed.system];
     }
   }
 
