@@ -35,3 +35,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Windows null device file (accidentally created)
 nul
+
+# Claude Code / claude-flow 本地文件
+.claude/
+.claude-flow/
+.mcp.json
