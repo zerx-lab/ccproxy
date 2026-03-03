@@ -48,11 +48,10 @@ function hasExactClaudeCodeSystemPrompt(system: any): boolean {
     return system === CLAUDE_CODE_SYSTEM_PROMPT;
   }
   if (Array.isArray(system)) {
-    return system.some(
-      (item) =>
-        typeof item === "string"
-          ? item === CLAUDE_CODE_SYSTEM_PROMPT
-          : item?.text === CLAUDE_CODE_SYSTEM_PROMPT
+    return system.some((item) =>
+      typeof item === "string"
+        ? item === CLAUDE_CODE_SYSTEM_PROMPT
+        : item?.text === CLAUDE_CODE_SYSTEM_PROMPT,
     );
   }
   return false;
@@ -70,7 +69,7 @@ function hasExactClaudeCodeSystemPrompt(system: any): boolean {
  */
 export function processClaudeCodeRequestBody(
   body: any,
-  options: ProcessRequestOptions = {}
+  options: ProcessRequestOptions = {},
 ): any {
   const opts = { ...DEFAULT_OPTIONS, ...options };
   const parsed = typeof body === "string" ? JSON.parse(body) : { ...body };
@@ -83,8 +82,12 @@ export function processClaudeCodeRequestBody(
     : {};
 
   if (!hasExactClaudeCodeSystemPrompt(parsed.system)) {
-    const claudeCodeSystemBlock = { type: "text", text: CLAUDE_CODE_SYSTEM_PROMPT, ...cacheControl };
-    
+    const claudeCodeSystemBlock = {
+      type: "text",
+      text: CLAUDE_CODE_SYSTEM_PROMPT,
+      ...cacheControl,
+    };
+
     if (!parsed.system) {
       parsed.system = [claudeCodeSystemBlock];
     } else if (typeof parsed.system === "string") {
@@ -159,7 +162,7 @@ export function processClaudeCodeRequestBody(
     const messageCount = parsed.messages.length;
     const cacheStartIndex = Math.max(
       0,
-      messageCount - (opts.cacheMessageCount || 3)
+      messageCount - (opts.cacheMessageCount || 3),
     );
 
     parsed.messages = parsed.messages.map((msg: any, index: number) => {
@@ -221,7 +224,7 @@ export function removeToolPrefixFromResponse(text: string): string {
 export async function sendClaudeCodeRequest(
   accessToken: string,
   body: any,
-  stream: boolean = false
+  stream: boolean = false,
 ): Promise<Response> {
   const url = new URL("https://api.anthropic.com/v1/messages");
   url.searchParams.set("beta", "true");
@@ -251,7 +254,7 @@ export async function sendClaudeCodeRequest(
     });
 
     console.log(
-      `[${new Date().toISOString()}] Sending request to Anthropic API (body size: ${bodyStr.length} bytes, attempt ${attempts}/${MAX_RETRIES})`
+      `[${new Date().toISOString()}] Sending request to Anthropic API (body size: ${bodyStr.length} bytes, attempt ${attempts}/${MAX_RETRIES})`,
     );
 
     try {
@@ -285,25 +288,25 @@ export async function sendClaudeCodeRequest(
       });
 
       console.log(
-        `[${new Date().toISOString()}] Anthropic API response: ${response.status} ${response.statusText}`
+        `[${new Date().toISOString()}] Anthropic API response: ${response.status} ${response.statusText}`,
       );
 
       // 检查是否需要刷新 token（401 错误）
       if (response.status === 401) {
         console.log(
-          `[${new Date().toISOString()}] Received 401, attempting to refresh token...`
+          `[${new Date().toISOString()}] Received 401, attempting to refresh token...`,
         );
 
         const newToken = await forceRefreshAccessToken();
         if (newToken) {
           currentToken = newToken;
           console.log(
-            `[${new Date().toISOString()}] Token refreshed, retrying request...`
+            `[${new Date().toISOString()}] Token refreshed, retrying request...`,
           );
           continue; // 使用新 token 重试
         } else {
           console.error(
-            `[${new Date().toISOString()}] Failed to refresh token, returning 401 response`
+            `[${new Date().toISOString()}] Failed to refresh token, returning 401 response`,
           );
           return response; // 刷新失败，返回原始 401 响应
         }
@@ -312,10 +315,15 @@ export async function sendClaudeCodeRequest(
       // 检查是否需要重试（429 或 529 错误）
       if (response.status === 429 || response.status === 529) {
         const retryAfter = response.headers.get("retry-after");
-        const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : 2000 * (1 << (attempts - 1));
+        // 使用 parseFloat 而非 parseInt，正确处理小数秒（如 "0.5"）
+        // 同时设置上限 60s，避免因异常 retry-after 值导致超长等待
+        const retryAfterMs = retryAfter
+          ? Math.min(parseFloat(retryAfter) * 1000, 60000)
+          : 2000 * (1 << (attempts - 1));
+        const waitMs = Math.max(retryAfterMs, 500); // 最少等 500ms
 
         console.log(
-          `[${new Date().toISOString()}] Rate limited (${response.status}), waiting ${waitMs}ms before retry...`
+          `[${new Date().toISOString()}] Rate limited (${response.status}), waiting ${waitMs}ms before retry (retry-after: ${retryAfter ?? "none"})...`,
         );
 
         await new Promise((resolve) => setTimeout(resolve, waitMs));
@@ -340,14 +348,14 @@ export async function sendClaudeCodeRequest(
 
       console.error(
         `[${new Date().toISOString()}] Anthropic API error (attempt ${attempts}/${MAX_RETRIES}):`,
-        error
+        error,
       );
 
       // 如果还有重试机会，等待后重试
       if (attempts < MAX_RETRIES) {
         const waitMs = 2000 * (1 << (attempts - 1));
         console.log(
-          `[${new Date().toISOString()}] Waiting ${waitMs}ms before retry...`
+          `[${new Date().toISOString()}] Waiting ${waitMs}ms before retry...`,
         );
         await new Promise((resolve) => setTimeout(resolve, waitMs));
         continue;
@@ -368,7 +376,7 @@ export async function sendClaudeCodeRequest(
  */
 export function createAuthenticatedFetch(
   getAccessToken: () => Promise<string | null>,
-  options: ProcessRequestOptions = {}
+  options: ProcessRequestOptions = {},
 ) {
   // 对于通过 AI SDK 的请求，默认不强制添加 placeholder 工具
   // 因为 AI SDK 会自己管理工具
@@ -380,7 +388,7 @@ export function createAuthenticatedFetch(
 
   return async (
     input: string | URL | globalThis.Request,
-    init?: RequestInit
+    init?: RequestInit,
   ): Promise<Response> => {
     let accessToken = await getAccessToken();
     if (!accessToken) {
@@ -449,19 +457,19 @@ export function createAuthenticatedFetch(
       // 检查是否需要刷新 token（401 错误）
       if (response.status === 401) {
         console.log(
-          `[${new Date().toISOString()}] Received 401 in authenticated fetch, attempting to refresh token...`
+          `[${new Date().toISOString()}] Received 401 in authenticated fetch, attempting to refresh token...`,
         );
 
         const newToken = await forceRefreshAccessToken();
         if (newToken) {
           accessToken = newToken;
           console.log(
-            `[${new Date().toISOString()}] Token refreshed, retrying request...`
+            `[${new Date().toISOString()}] Token refreshed, retrying request...`,
           );
           continue; // 使用新 token 重试
         } else {
           console.error(
-            `[${new Date().toISOString()}] Failed to refresh token, returning 401 response`
+            `[${new Date().toISOString()}] Failed to refresh token, returning 401 response`,
           );
           return response; // 刷新失败，返回原始 401 响应
         }
@@ -470,10 +478,15 @@ export function createAuthenticatedFetch(
       // 检查是否需要重试（429 或 529 错误）
       if (response.status === 429 || response.status === 529) {
         const retryAfter = response.headers.get("retry-after");
-        const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : 2000 * (1 << (attempts - 1));
+        // 使用 parseFloat 而非 parseInt，正确处理小数秒（如 "0.5"）
+        // 同时设置上限 60s，避免因异常 retry-after 值导致超长等待
+        const retryAfterMs = retryAfter
+          ? Math.min(parseFloat(retryAfter) * 1000, 60000)
+          : 2000 * (1 << (attempts - 1));
+        const waitMs = Math.max(retryAfterMs, 500); // 最少等 500ms
 
         console.log(
-          `[${new Date().toISOString()}] Rate limited (${response.status}), waiting ${waitMs}ms before retry...`
+          `[${new Date().toISOString()}] Rate limited (${response.status}), waiting ${waitMs}ms before retry (retry-after: ${retryAfter ?? "none"})...`,
         );
 
         await new Promise((resolve) => setTimeout(resolve, waitMs));

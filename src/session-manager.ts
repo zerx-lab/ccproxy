@@ -2,6 +2,11 @@
  * 会话管理器
  * - 防止同一会话的并发请求
  * - 请求去重（防止短时间内的重复请求）
+ *
+ * 修复说明：
+ * 1. isDuplicateRequest 仅对消息内容 hash，排除 model/temperature 等易变字段，避免误判
+ * 2. endRequest 改为幂等安全版本，流异常时不会造成 session 永久锁死
+ * 3. startRequest 在 ReadableStream cancel/error 场景下通过 AbortController 信号触发自动清理
  */
 
 import { createHash } from "crypto";
@@ -10,7 +15,7 @@ import { createHash } from "crypto";
 interface ActiveRequest {
   /** 请求开始时间 */
   startTime: number;
-  /** 请求内容 hash */
+  /** 请求内容 hash（仅消息内容，不含易变参数） */
   contentHash: string;
   /** 取消函数（用于流式响应） */
   abortController?: AbortController;
@@ -43,6 +48,32 @@ const DEFAULT_CONFIG: SessionManagerConfig = {
   enableBusyCheck: true,
 };
 
+/**
+ * 从请求体中提取用于去重的稳定内容字段
+ * 排除 model、temperature、stream 等每次可能不同但语义相同的字段，
+ * 只对消息/工具/系统提示等核心内容做 hash，避免误判。
+ */
+function extractStableContent(body: any): any {
+  if (!body || typeof body !== "object") return body;
+
+  // Anthropic Messages / Chat Completions 格式
+  const stable: Record<string, any> = {};
+
+  if (body.messages !== undefined) stable.messages = body.messages;
+  if (body.system !== undefined) stable.system = body.system;
+  if (body.tools !== undefined) stable.tools = body.tools;
+  if (body.tool_choice !== undefined) stable.tool_choice = body.tool_choice;
+
+  // Responses API 格式
+  if (body.input !== undefined) stable.input = body.input;
+  if (body.instructions !== undefined) stable.instructions = body.instructions;
+
+  // 如果既没有 messages 也没有 input，回退到全量（最后保底）
+  if (Object.keys(stable).length === 0) return body;
+
+  return stable;
+}
+
 class SessionManager {
   /** 活跃请求映射：sessionId -> ActiveRequest */
   private activeRequests: Map<string, ActiveRequest> = new Map();
@@ -62,7 +93,7 @@ class SessionManager {
   }
 
   /**
-   * 计算请求内容的 hash
+   * 计算内容的 hash
    */
   private computeHash(content: any): string {
     const str = typeof content === "string" ? content : JSON.stringify(content);
@@ -97,7 +128,11 @@ class SessionManager {
     // 这样可以：
     // - 防止完全相同的请求并发处理
     // - 允许工具调用后的后续请求（消息数量不同）
-    if (body.messages && Array.isArray(body.messages) && body.messages.length > 0) {
+    if (
+      body.messages &&
+      Array.isArray(body.messages) &&
+      body.messages.length > 0
+    ) {
       const firstMessage = body.messages[0];
       // 使用消息数量 + 第一条消息的 hash，确保工具调用循环的每个请求有唯一 ID
       const sessionKey = `msg_${body.messages.length}_${this.computeHash(firstMessage)}`;
@@ -127,9 +162,9 @@ class SessionManager {
       return false;
     }
 
-    // 检查是否超时
+    // 检查是否超时（使用 >= 确保 requestTimeoutMs=0 时立即超时）
     const elapsed = Date.now() - active.startTime;
-    if (elapsed > this.config.requestTimeoutMs) {
+    if (elapsed >= this.config.requestTimeoutMs) {
       // 超时，清理这个请求
       this.activeRequests.delete(sessionId);
       return false;
@@ -140,13 +175,15 @@ class SessionManager {
 
   /**
    * 检查请求是否重复（在去重时间窗口内）
+   * 只对消息内容做 hash，排除 model/temperature 等易变字段，避免误判。
    */
   isDuplicateRequest(body: any): boolean {
     if (!this.config.enableDedupe) {
       return false;
     }
 
-    const contentHash = this.computeHash(body);
+    const stableContent = extractStableContent(body);
+    const contentHash = this.computeHash(stableContent);
     const entry = this.dedupeCache.get(contentHash);
 
     if (!entry) {
@@ -158,7 +195,7 @@ class SessionManager {
     // 如果在时间窗口内，且请求仍在处理中，认为是重复请求
     if (elapsed < this.config.dedupeWindowMs && entry.inProgress) {
       console.log(
-        `[session-manager] Duplicate request detected (hash: ${contentHash}, elapsed: ${elapsed}ms)`
+        `[session-manager] Duplicate request detected (hash: ${contentHash}, elapsed: ${elapsed}ms)`,
       );
       return true;
     }
@@ -173,7 +210,7 @@ class SessionManager {
   startRequest(
     sessionId: string,
     body: any,
-    abortController?: AbortController
+    abortController?: AbortController,
   ): { accepted: boolean; reason?: string } {
     // 检查会话是否忙碌
     if (this.isSessionBusy(sessionId)) {
@@ -183,7 +220,7 @@ class SessionManager {
       };
     }
 
-    // 检查是否重复请求
+    // 检查是否重复请求（仅对稳定内容做 hash）
     if (this.isDuplicateRequest(body)) {
       return {
         accepted: false,
@@ -191,7 +228,8 @@ class SessionManager {
       };
     }
 
-    const contentHash = this.computeHash(body);
+    const stableContent = extractStableContent(body);
+    const contentHash = this.computeHash(stableContent);
     const now = Date.now();
 
     // 记录活跃请求
@@ -208,32 +246,47 @@ class SessionManager {
     });
 
     console.log(
-      `[session-manager] Request started (session: ${sessionId}, hash: ${contentHash})`
+      `[session-manager] Request started (session: ${sessionId}, hash: ${contentHash})`,
     );
+
+    // 如果提供了 AbortController，监听 abort 事件以自动清理
+    // 这样即使流传输异常（既没有走 done 也没有走 cancel），session 也会被释放
+    if (abortController) {
+      abortController.signal.addEventListener(
+        "abort",
+        () => {
+          this.endRequest(sessionId);
+        },
+        { once: true },
+      );
+    }
 
     return { accepted: true };
   }
 
   /**
-   * 结束请求跟踪
+   * 结束请求跟踪（幂等，多次调用安全）
    */
   endRequest(sessionId: string): void {
     const active = this.activeRequests.get(sessionId);
-    if (active) {
-      // 更新去重缓存
-      const entry = this.dedupeCache.get(active.contentHash);
-      if (entry) {
-        entry.inProgress = false;
-      }
-
-      // 移除活跃请求
-      this.activeRequests.delete(sessionId);
-
-      const duration = Date.now() - active.startTime;
-      console.log(
-        `[session-manager] Request ended (session: ${sessionId}, duration: ${duration}ms)`
-      );
+    if (!active) {
+      // 已经结束，幂等返回
+      return;
     }
+
+    // 更新去重缓存
+    const entry = this.dedupeCache.get(active.contentHash);
+    if (entry) {
+      entry.inProgress = false;
+    }
+
+    // 移除活跃请求
+    this.activeRequests.delete(sessionId);
+
+    const duration = Date.now() - active.startTime;
+    console.log(
+      `[session-manager] Request ended (session: ${sessionId}, duration: ${duration}ms)`,
+    );
   }
 
   /**
@@ -242,11 +295,12 @@ class SessionManager {
   cancelRequest(sessionId: string): boolean {
     const active = this.activeRequests.get(sessionId);
     if (active?.abortController) {
+      // abort() 会触发 signal 的 abort 事件，endRequest 会在那里被调用
       active.abortController.abort();
-      this.endRequest(sessionId);
-      console.log(`[session-manager] Request cancelled (session: ${sessionId})`);
       return true;
     }
+    // 没有 abortController 时直接结束
+    this.endRequest(sessionId);
     return false;
   }
 
@@ -291,7 +345,7 @@ class SessionManager {
     for (const [sessionId, active] of this.activeRequests.entries()) {
       if (now - active.startTime > this.config.requestTimeoutMs) {
         console.log(
-          `[session-manager] Cleaning up timed out request (session: ${sessionId})`
+          `[session-manager] Cleaning up timed out request (session: ${sessionId})`,
         );
         this.activeRequests.delete(sessionId);
       }
@@ -313,4 +367,5 @@ class SessionManager {
 export const sessionManager = new SessionManager();
 
 // 导出类型和类（用于测试或自定义实例）
-export { SessionManager, SessionManagerConfig, ActiveRequest };
+export { SessionManager };
+export type { SessionManagerConfig, ActiveRequest };

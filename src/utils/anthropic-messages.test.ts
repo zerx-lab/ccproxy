@@ -110,8 +110,7 @@ describe("System Prompt 注入", () => {
     // 检测已注入
     const hasClaudeCodePrompt = Array.isArray(bodyWithPrompt.system)
       ? bodyWithPrompt.system.some(
-          (s: any) =>
-            s.type === "text" && s.text === CLAUDE_CODE_SYSTEM_PROMPT,
+          (s: any) => s.type === "text" && s.text === CLAUDE_CODE_SYSTEM_PROMPT,
         )
       : bodyWithPrompt.system === CLAUDE_CODE_SYSTEM_PROMPT;
 
@@ -182,7 +181,10 @@ describe("Tool 名称前缀处理", () => {
     for (const msg of messages) {
       if (Array.isArray(msg.content)) {
         for (const block of msg.content) {
-          if (block.type === "tool_use" && !block.name.startsWith(TOOL_PREFIX)) {
+          if (
+            block.type === "tool_use" &&
+            !block.name.startsWith(TOOL_PREFIX)
+          ) {
             block.name = `${TOOL_PREFIX}${block.name}`;
           }
         }
@@ -197,10 +199,7 @@ describe("Tool 名称前缀处理", () => {
       'Using tool "mcp_shell" to run command, then "mcp_Read" to read file';
 
     // 模拟 removeToolPrefixFromResponse
-    const cleaned = responseText.replace(
-      /\bmcp_([a-zA-Z0-9_]+)/g,
-      "$1",
-    );
+    const cleaned = responseText.replace(/\bmcp_([a-zA-Z0-9_]+)/g, "$1");
 
     expect(cleaned).toBe(
       'Using tool "shell" to run command, then "Read" to read file',
@@ -662,9 +661,9 @@ describe("模型映射", () => {
       "gpt-4": "claude-sonnet-4-5",
       "gpt-4-turbo": "claude-sonnet-4-5",
       "gpt-3.5-turbo": "claude-haiku-4-5",
-      "o1": "claude-opus-4-5",
+      o1: "claude-opus-4-5",
       "o1-mini": "claude-sonnet-4-5",
-      "o3": "claude-opus-4-5",
+      o3: "claude-opus-4-5",
       "o3-mini": "claude-sonnet-4-5",
     };
 
@@ -759,5 +758,278 @@ describe("请求处理幂等性", () => {
     // 再次处理不会变成 mcp_mcp_shell
     const result = alreadyPrefixed ? toolName : `${TOOL_PREFIX}${toolName}`;
     expect(result).toBe("mcp_shell");
+  });
+});
+
+// ============================================================
+// SessionManager 修复验证
+// ============================================================
+import { SessionManager } from "../session-manager";
+
+describe("SessionManager - 去重 hash 稳定性", () => {
+  test("不同消息内容的请求不应被判为重复（即使 model/temperature 相同）", () => {
+    const manager = new SessionManager({
+      dedupeWindowMs: 5000,
+      enableDedupe: true,
+      enableBusyCheck: false,
+    });
+
+    const bodyA = {
+      messages: [{ role: "user", content: "Hello" }],
+      model: "claude-opus-4-5",
+      temperature: 0.7,
+    };
+
+    const bodyB = {
+      messages: [{ role: "user", content: "Completely different question" }],
+      model: "claude-opus-4-5", // 相同 model
+      temperature: 0.7, // 相同 temperature
+    };
+
+    // 第一个请求先注册
+    const sessionId = "test-session-stable-hash";
+    manager.startRequest(sessionId, bodyA);
+
+    // 不同消息内容的请求不应被视为重复
+    const isDupe = manager.isDuplicateRequest(bodyB);
+    expect(isDupe).toBe(false);
+
+    manager.endRequest(sessionId);
+  });
+
+  test("相同消息内容但不同 model/temperature 的请求应被判为重复（内容相同）", () => {
+    const manager = new SessionManager({
+      dedupeWindowMs: 5000,
+      enableDedupe: true,
+      enableBusyCheck: false,
+    });
+
+    const bodyA = {
+      messages: [{ role: "user", content: "Hello" }],
+      model: "claude-opus-4-5",
+      temperature: 0.7,
+      stream: true,
+    };
+
+    const bodyB = {
+      messages: [{ role: "user", content: "Hello" }],
+      model: "claude-haiku-4-5", // 不同 model，但 messages 内容相同
+      temperature: 0.9, // 不同 temperature
+      stream: false,
+    };
+
+    // 第一个请求先注册
+    const sessionId = "test-session-same-content";
+    manager.startRequest(sessionId, bodyA);
+
+    // messages 内容相同，即使 model/temperature 不同，仍被视为重复（防止客户端重试风暴）
+    const isDupe = manager.isDuplicateRequest(bodyB);
+    expect(isDupe).toBe(true);
+
+    manager.endRequest(sessionId);
+  });
+
+  test("完全相同消息内容的并发请求应被判为重复", () => {
+    const manager = new SessionManager({
+      dedupeWindowMs: 5000,
+      enableDedupe: true,
+      enableBusyCheck: false,
+    });
+
+    const body = {
+      messages: [{ role: "user", content: "Hello" }],
+      model: "claude-opus-4-5",
+      temperature: 0.7,
+    };
+
+    const sessionId = "test-session-dupe";
+    manager.startRequest(sessionId, body);
+
+    // 完全相同内容（messages/system/tools 相同）应被视为重复
+    const isDupe = manager.isDuplicateRequest(body);
+    expect(isDupe).toBe(true);
+
+    manager.endRequest(sessionId);
+  });
+
+  test("请求结束后同内容请求不再被视为重复", () => {
+    const manager = new SessionManager({
+      dedupeWindowMs: 5000,
+      enableDedupe: true,
+      enableBusyCheck: false,
+    });
+
+    const body = {
+      messages: [{ role: "user", content: "Hello" }],
+    };
+
+    const sessionId = "test-session-after-end";
+    manager.startRequest(sessionId, body);
+    manager.endRequest(sessionId);
+
+    // 结束后 inProgress=false，不再是重复
+    const isDupe = manager.isDuplicateRequest(body);
+    expect(isDupe).toBe(false);
+  });
+});
+
+describe("SessionManager - endRequest 幂等性", () => {
+  test("多次调用 endRequest 不会抛出错误", () => {
+    const manager = new SessionManager({
+      enableDedupe: true,
+      enableBusyCheck: true,
+    });
+
+    const body = { messages: [{ role: "user", content: "Test" }] };
+    const sessionId = "test-idempotent";
+
+    manager.startRequest(sessionId, body);
+
+    // 第一次结束
+    expect(() => manager.endRequest(sessionId)).not.toThrow();
+    // 第二次结束（幂等）
+    expect(() => manager.endRequest(sessionId)).not.toThrow();
+    // 第三次结束
+    expect(() => manager.endRequest(sessionId)).not.toThrow();
+  });
+
+  test("endRequest 之后 activeSessionCount 减少", () => {
+    const manager = new SessionManager({
+      enableDedupe: false,
+      enableBusyCheck: true,
+    });
+
+    const body1 = { messages: [{ role: "user", content: "First" }] };
+    const body2 = { messages: [{ role: "user", content: "Second" }] };
+
+    manager.startRequest("session-1", body1);
+    manager.startRequest("session-2", body2);
+    expect(manager.getActiveSessionCount()).toBe(2);
+
+    manager.endRequest("session-1");
+    expect(manager.getActiveSessionCount()).toBe(1);
+
+    manager.endRequest("session-2");
+    expect(manager.getActiveSessionCount()).toBe(0);
+
+    // 再次调用不会变成负数或抛错
+    manager.endRequest("session-2");
+    expect(manager.getActiveSessionCount()).toBe(0);
+  });
+});
+
+describe("SessionManager - 会话忙碌检测", () => {
+  test("活跃请求期间相同 sessionId 的请求应被拒绝", () => {
+    const manager = new SessionManager({
+      enableDedupe: false,
+      enableBusyCheck: true,
+    });
+
+    const body = { messages: [{ role: "user", content: "Hello" }] };
+    const sessionId = "busy-session";
+
+    const result1 = manager.startRequest(sessionId, body);
+    expect(result1.accepted).toBe(true);
+
+    // 同一 sessionId 再次请求应被拒绝
+    const result2 = manager.startRequest(sessionId, {
+      messages: [{ role: "user", content: "Hello" }],
+    });
+    expect(result2.accepted).toBe(false);
+    expect(result2.reason).toContain(sessionId);
+
+    manager.endRequest(sessionId);
+
+    // 结束后可以再次请求
+    const result3 = manager.startRequest(sessionId, body);
+    expect(result3.accepted).toBe(true);
+    manager.endRequest(sessionId);
+  });
+
+  test("超时的活跃请求不阻塞后续请求", async () => {
+    const manager = new SessionManager({
+      enableDedupe: false,
+      enableBusyCheck: true,
+      requestTimeoutMs: 1, // 1ms 超时
+    });
+
+    const body = { messages: [{ role: "user", content: "Hello" }] };
+    const sessionId = "timeout-session";
+
+    manager.startRequest(sessionId, body);
+
+    // 等待超过 requestTimeoutMs，确保请求已超时
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    // 超时后 isSessionBusy 应该认为已过期，返回 false
+    const isBusy = manager.isSessionBusy(sessionId);
+    expect(isBusy).toBe(false);
+  });
+});
+
+describe("SessionManager - AbortController 自动清理", () => {
+  test("abort 信号触发时 session 应自动被释放", async () => {
+    const manager = new SessionManager({
+      enableDedupe: false,
+      enableBusyCheck: true,
+    });
+
+    const body = { messages: [{ role: "user", content: "Hello" }] };
+    const sessionId = "abort-session";
+    const abortController = new AbortController();
+
+    manager.startRequest(sessionId, body, abortController);
+    expect(manager.getActiveSessionCount()).toBe(1);
+
+    // 触发 abort
+    abortController.abort();
+
+    // abort 事件是同步触发的，session 应立即释放
+    expect(manager.getActiveSessionCount()).toBe(0);
+  });
+});
+
+describe("retry-after 解析精度", () => {
+  test("parseFloat 能正确处理小数秒", () => {
+    const retryAfterValues = ["0.5", "1.5", "0", "30", "60.9"];
+    const expected = [500, 1500, 500, 30000, 60000]; // 最小 500ms，最大 60000ms
+
+    for (let i = 0; i < retryAfterValues.length; i++) {
+      const retryAfter = retryAfterValues[i];
+      const retryAfterMs = retryAfter
+        ? Math.min(parseFloat(retryAfter!) * 1000, 60000)
+        : 2000;
+      const waitMs = Math.max(retryAfterMs, 500);
+      expect(waitMs).toBe(expected[i]!);
+    }
+  });
+
+  test("parseInt 会截断小数秒导致等待不足", () => {
+    // 验证旧行为（parseInt）确实有问题
+    const retryAfter = "0.5";
+    const oldWaitMs = parseInt(retryAfter) * 1000; // parseInt("0.5") = 0
+    expect(oldWaitMs).toBe(0); // 旧行为：等待 0ms，立即重试
+
+    // 新行为（parseFloat）正确
+    const newWaitMs = Math.max(
+      Math.min(parseFloat(retryAfter) * 1000, 60000),
+      500,
+    );
+    expect(newWaitMs).toBe(500); // 新行为：至少等 500ms
+  });
+
+  test("超大 retry-after 值被上限截断为 60s", () => {
+    const retryAfter = "3600"; // 1 小时
+    const retryAfterMs = Math.min(parseFloat(retryAfter) * 1000, 60000);
+    const waitMs = Math.max(retryAfterMs, 500);
+    expect(waitMs).toBe(60000);
+  });
+
+  test("无 retry-after 时使用指数退避", () => {
+    // attempt 1: 2000 * 2^0 = 2000
+    // attempt 2: 2000 * 2^1 = 4000
+    // attempt 3: 2000 * 2^2 = 8000
+    const delays = [1, 2, 3].map((attempt) => 2000 * (1 << (attempt - 1)));
+    expect(delays).toEqual([2000, 4000, 8000]);
   });
 });

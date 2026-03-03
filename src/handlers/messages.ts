@@ -35,7 +35,7 @@ export function createMessagesHandler(mapModelName: (model: string) => string) {
  */
 async function handleMessagesInternal(
   c: Context,
-  mapModelName: (model: string) => string
+  mapModelName: (model: string) => string,
 ) {
   const endpoint = "/v1/messages";
   let sessionId: string | null = null;
@@ -75,7 +75,7 @@ async function handleMessagesInternal(
             type: "invalid_request_error",
           },
         },
-        400
+        400,
       );
     }
 
@@ -92,7 +92,7 @@ async function handleMessagesInternal(
             type: "rate_limit_error",
           },
         },
-        429
+        429,
       );
     }
 
@@ -149,7 +149,7 @@ async function handleMessagesInternal(
     const response = await sendClaudeCodeRequest(
       accessToken,
       processedBody,
-      isStreaming
+      isStreaming,
     );
 
     // 如果是流式响应，转换工具名称
@@ -170,79 +170,113 @@ async function handleMessagesInternal(
 
       const stream = new ReadableStream({
         async pull(controller) {
-          const { done, value } = await reader.read();
-          if (done) {
-            // 流结束，更新 trace 和 generation
-            const streamOutput = {
-              content: fullContent || null,
-              stop_reason: stopReason || "end_turn",
-            };
+          try {
+            const { done, value } = await reader.read();
+            if (done) {
+              // 流结束，更新 trace 和 generation
+              const streamOutput = {
+                content: fullContent || null,
+                stop_reason: stopReason || "end_turn",
+              };
 
-            if (currentTrace) {
-              updateTrace(currentTrace, { output: streamOutput });
+              if (currentTrace) {
+                updateTrace(currentTrace, { output: streamOutput });
+              }
+
+              if (currentGeneration) {
+                endGeneration({
+                  generation: currentGeneration,
+                  output: streamOutput,
+                  usage: {
+                    promptTokens: inputTokens,
+                    completionTokens: outputTokens,
+                    totalTokens: inputTokens + outputTokens,
+                  },
+                });
+                flushLangfuse();
+              }
+
+              // 结束会话跟踪
+              if (currentSessionId) {
+                sessionManager.endRequest(currentSessionId);
+              }
+              controller.close();
+              return;
             }
 
+            let text = decoder.decode(value, { stream: true });
+
+            // 解析 SSE 事件以提取 usage 信息
+            sseBuffer += text;
+            const lines = sseBuffer.split("\n");
+            sseBuffer = lines.pop() || ""; // 保留不完整的行
+
+            for (const line of lines) {
+              if (line.startsWith("data: ")) {
+                const dataStr = line.slice(6);
+                if (dataStr === "[DONE]") continue;
+
+                try {
+                  const event = JSON.parse(dataStr);
+
+                  // message_start 事件包含 input_tokens
+                  if (event.type === "message_start" && event.message?.usage) {
+                    inputTokens = event.message.usage.input_tokens || 0;
+                  }
+
+                  // message_delta 事件包含 output_tokens
+                  if (event.type === "message_delta" && event.usage) {
+                    outputTokens = event.usage.output_tokens || 0;
+                    if (event.delta?.stop_reason) {
+                      stopReason = event.delta.stop_reason;
+                    }
+                  }
+
+                  // content_block_delta 事件包含文本内容
+                  if (
+                    event.type === "content_block_delta" &&
+                    event.delta?.text
+                  ) {
+                    fullContent += event.delta.text;
+                  }
+                } catch {
+                  // JSON 解析失败，忽略
+                }
+              }
+            }
+
+            text = removeToolPrefixFromResponse(text);
+            controller.enqueue(encoder.encode(text));
+          } catch (streamError) {
+            // 流读取异常：确保 session 被释放，避免永久锁死
+            if (currentSessionId) {
+              sessionManager.endRequest(currentSessionId);
+            }
             if (currentGeneration) {
               endGeneration({
                 generation: currentGeneration,
-                output: streamOutput,
+                output: {
+                  content: fullContent || null,
+                  error:
+                    streamError instanceof Error
+                      ? streamError.message
+                      : "Stream read error",
+                },
                 usage: {
                   promptTokens: inputTokens,
                   completionTokens: outputTokens,
                   totalTokens: inputTokens + outputTokens,
                 },
+                level: "ERROR",
+                statusMessage:
+                  streamError instanceof Error
+                    ? streamError.message
+                    : "Stream read error",
               });
               flushLangfuse();
             }
-
-            // 结束会话跟踪
-            if (currentSessionId) {
-              sessionManager.endRequest(currentSessionId);
-            }
-            controller.close();
-            return;
+            controller.error(streamError);
           }
-
-          let text = decoder.decode(value, { stream: true });
-
-          // 解析 SSE 事件以提取 usage 信息
-          sseBuffer += text;
-          const lines = sseBuffer.split("\n");
-          sseBuffer = lines.pop() || ""; // 保留不完整的行
-
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const dataStr = line.slice(6);
-              if (dataStr === "[DONE]") continue;
-
-              try {
-                const event = JSON.parse(dataStr);
-
-                // message_start 事件包含 input_tokens
-                if (event.type === "message_start" && event.message?.usage) {
-                  inputTokens = event.message.usage.input_tokens || 0;
-                }
-
-                // message_delta 事件包含 output_tokens
-                if (event.type === "message_delta" && event.usage) {
-                  outputTokens = event.usage.output_tokens || 0;
-                  if (event.delta?.stop_reason) {
-                    stopReason = event.delta.stop_reason;
-                  }
-                }
-
-                // content_block_delta 事件包含文本内容
-                if (event.type === "content_block_delta" && event.delta?.text) {
-                  fullContent += event.delta.text;
-                }
-              } catch {
-                // JSON 解析失败，忽略
-              }
-            }
-          }
-
-          text = removeToolPrefixFromResponse(text);
-          controller.enqueue(encoder.encode(text));
         },
         cancel() {
           // 客户端断开连接时结束会话跟踪和 Langfuse
@@ -307,11 +341,14 @@ async function handleMessagesInternal(
         endGeneration({
           generation,
           output,
-          usage: usage ? {
-            promptTokens: usage.input_tokens,
-            completionTokens: usage.output_tokens,
-            totalTokens: (usage.input_tokens || 0) + (usage.output_tokens || 0),
-          } : undefined,
+          usage: usage
+            ? {
+                promptTokens: usage.input_tokens,
+                completionTokens: usage.output_tokens,
+                totalTokens:
+                  (usage.input_tokens || 0) + (usage.output_tokens || 0),
+              }
+            : undefined,
         });
         flushLangfuse();
       }
@@ -333,7 +370,9 @@ async function handleMessagesInternal(
     if (generation) {
       endGeneration({
         generation,
-        output: { error: error instanceof Error ? error.message : "Unknown error" },
+        output: {
+          error: error instanceof Error ? error.message : "Unknown error",
+        },
         level: "ERROR",
         statusMessage: error instanceof Error ? error.message : "Unknown error",
       });
@@ -352,7 +391,7 @@ async function handleMessagesInternal(
           message: error instanceof Error ? error.message : "Unknown error",
         },
       },
-      500
+      500,
     );
   }
 }
