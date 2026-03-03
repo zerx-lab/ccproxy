@@ -231,6 +231,85 @@ curl http://127.0.0.1:3456/v1/messages \
   }'
 ```
 
+## API 参数兼容性
+
+CCProxy 尽量将 OpenAI API 参数映射到对应的 Anthropic 参数。以下是详细的兼容性说明。
+
+### Chat Completions (`/v1/chat/completions`)
+
+| 参数 | 支持状态 | 映射方式 |
+|------|----------|----------|
+| `model` | ✅ 完全支持 | 通过模型名称映射表转换 |
+| `messages` | ✅ 完全支持 | 转换为 Anthropic messages 格式 |
+| `messages[].role = "system"` | ✅ 完全支持 | 提取为 Anthropic system prompt |
+| `messages[].role = "developer"` | ✅ 完全支持 | 等同于 system，提取为 system prompt |
+| `messages[].role = "user"` | ✅ 完全支持 | 直接映射 |
+| `messages[].role = "assistant"` | ✅ 完全支持 | 直接映射 |
+| `messages[].role = "tool"` | ✅ 完全支持 | 转换为 Anthropic tool_result |
+| `tools` | ✅ 完全支持 | 转换为 Anthropic tools 格式 |
+| `tool_choice` | ✅ 完全支持 | none/auto/required/function 全映射 |
+| `stream` | ✅ 完全支持 | SSE 流式响应 |
+| `temperature` | ✅ 完全支持 | 直接传递 |
+| `top_p` | ✅ 完全支持 | 映射为 Anthropic `topP` |
+| `max_tokens` | ✅ 完全支持 | 映射为 Anthropic `maxOutputTokens` |
+| `max_completion_tokens` | ✅ 完全支持 | 优先于 `max_tokens` |
+| `stop` | ✅ 完全支持 | 映射为 Anthropic `stopSequences` |
+| `parallel_tool_calls` | ✅ 完全支持 | 映射为 Anthropic `disableParallelToolUse`（取反） |
+| `prompt_cache_key` | ✅ 支持 | 映射为 Anthropic `cacheControl: ephemeral` |
+| `reasoning_effort` | ⚡ 映射支持 | low→4096, medium→10000, high→20000 budgetTokens |
+| `response_format.type="text"` | ✅ 完全支持 | 无需处理 |
+| `response_format.type="json_object"` | ⚠️ 部分支持 | 向 system prompt 注入 JSON 指令，不保证严格 JSON 输出 |
+| `response_format.type="json_schema"` | ⚠️ 部分支持 | 将 schema 注入 system prompt，无结构化输出保证 |
+| `stream_options.include_usage` | ✅ 支持 | 在 `[DONE]` 前发送 usage SSE chunk |
+| `user` | 🔇 忽略 | 接受但不使用（Anthropic 不支持用户ID透传） |
+| `n` | 🔇 忽略 | 始终返回 1 条结果 |
+| `seed` | 🔇 忽略 | Anthropic 不支持确定性输出 |
+| `logprobs` / `top_logprobs` | 🔇 忽略 | Anthropic 不提供 logprobs |
+| `presence_penalty` / `frequency_penalty` | 🔇 忽略 | Anthropic 不支持 |
+| `logit_bias` | 🔇 忽略 | Anthropic 不支持 |
+| `web_search_options` | 🔇 忽略 | Anthropic 不支持原生网络搜索 |
+| `prediction` | 🔇 忽略 | Anthropic 不支持预测输出 |
+| `store` | 🔇 忽略 | Anthropic 无状态存储 |
+| `service_tier` | 🔇 忽略 | OpenAI 基础设施概念 |
+
+### Responses API (`/v1/responses`)
+
+| 参数 | 支持状态 | 映射方式 |
+|------|----------|----------|
+| `model` | ✅ 完全支持 | 模型名称映射 |
+| `input` (string) | ✅ 完全支持 | 转为 user message |
+| `input` (array) | ✅ 完全支持 | 支持 message/function_call/function_call_output |
+| `input[].role="developer"` | ✅ 完全支持 | 合并到 system prompt |
+| `instructions` | ✅ 完全支持 | 作为 system prompt |
+| `tools` | ✅ 完全支持 | 转换为 Anthropic tools |
+| `tool_choice` | ✅ 完全支持 | 全类型映射 |
+| `stream` | ✅ 完全支持 | Responses API SSE 事件格式 |
+| `temperature` | ✅ 完全支持 | 直接传递 |
+| `top_p` | ✅ 完全支持 | 直接传递 |
+| `max_output_tokens` | ✅ 完全支持 | 默认 8192 |
+| `parallel_tool_calls` | ✅ 完全支持 | 映射为 `disableParallelToolUse` |
+| `metadata` | ✅ 回显 | 原样回显在响应中，不透传给模型 |
+| `previous_response_id` | ✅ 回显 | 接受并回显，多轮对话通过 input 数组实现 |
+| `truncation` | ✅ 回显 | 接受并回显 |
+| `reasoning.effort` | ⚡ 映射支持 | minimal→2048, low→4096, medium→10000, high→20000 budgetTokens |
+| `reasoning.summary` | 🔇 忽略 | Anthropic 不支持推理摘要格式 |
+| `store` | 🔇 忽略 | Anthropic 无持久存储 |
+| `text.format` | ⚠️ 部分支持 | json_object 类型通过 system prompt 注入实现 |
+| `include` | 🔇 忽略 | 仅 usage 数据默认包含 |
+| `context_management` | 🔇 忽略 | Anthropic 不支持自动上下文管理 |
+
+### Anthropic Messages (`/v1/messages`)
+
+Anthropic 原生格式直接透传，所有 Anthropic API 参数均完全支持：
+`model`, `messages`, `system`, `max_tokens`, `temperature`, `top_p`, `top_k`, `stop_sequences`, `stream`, `tools`, `tool_choice`, `metadata`, `thinking`（扩展思考）, `cache_control`
+
+### 图例
+
+- ✅ **完全支持** — 直接映射到 Anthropic 等效参数
+- ⚡ **映射支持** — 通过近似映射实现，语义基本一致
+- ⚠️ **部分支持** — 通过变通方式实现，行为可能与 OpenAI 有差异
+- 🔇 **忽略** — 参数被接受但不产生效果（不会报错）
+
 ## 文件结构
 
 ```

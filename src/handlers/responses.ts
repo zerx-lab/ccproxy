@@ -77,11 +77,31 @@ export function createResponsesHandler(
         stream = false,
         parallel_tool_calls,
         prompt_cache_key, // 缓存参数
+        reasoning,        // 映射到 Anthropic extended thinking
         ...rest
       } = body;
 
       // 映射模型名称
       const modelId = mapModelName(model);
+
+      // 映射 reasoning.effort → Anthropic extended thinking
+      const thinkingOption = reasoning?.effort
+        ? {
+            type: "enabled" as const,
+            budgetTokens:
+              reasoning.effort === "minimal" ? 2048
+              : reasoning.effort === "low" ? 4096
+              : reasoning.effort === "medium" ? 10000
+              : 20000, // high
+          }
+        : undefined;
+
+      // 当 thinking 启用时确保 maxOutputTokens 足够大
+      const baseMaxOutput = rest.max_output_tokens;
+      const effectiveMaxOutput =
+        thinkingOption && (!baseMaxOutput || baseMaxOutput <= thinkingOption.budgetTokens)
+          ? thinkingOption.budgetTokens + 4096
+          : baseMaxOutput || 8192;
 
       // 更新 trace 的 input
       if (trace) {
@@ -239,19 +259,18 @@ export function createResponsesHandler(
             toolChoice,
             temperature: rest.temperature,
             topP: rest.top_p,
-            maxOutputTokens: rest.max_output_tokens || 8192,
+            maxOutputTokens: effectiveMaxOutput,
             // 传递 Anthropic provider 选项
             providerOptions: {
               anthropic: {
-                // parallel_tool_calls: true (OpenAI) -> disableParallelToolUse: false (Anthropic)
-                // parallel_tool_calls: false (OpenAI) -> disableParallelToolUse: true (Anthropic)
                 ...(parallel_tool_calls !== undefined && {
                   disableParallelToolUse: !parallel_tool_calls,
                 }),
-                // 当有 prompt_cache_key 时，启用 Anthropic 缓存
                 ...(prompt_cache_key && {
                   cacheControl: { type: "ephemeral" as const },
                 }),
+                // reasoning.effort → Anthropic extended thinking
+                ...(thinkingOption && { thinking: thinkingOption }),
               },
             },
           });
@@ -622,7 +641,7 @@ export function createResponsesHandler(
           toolChoice,
           temperature: rest.temperature,
           topP: rest.top_p,
-          maxOutputTokens: rest.max_output_tokens || 8192,
+          maxOutputTokens: effectiveMaxOutput,
           // 传递 Anthropic provider 选项
           providerOptions: {
             anthropic: {
@@ -632,6 +651,8 @@ export function createResponsesHandler(
               ...(prompt_cache_key && {
                 cacheControl: { type: "ephemeral" as const },
               }),
+              // reasoning.effort → Anthropic extended thinking
+              ...(thinkingOption && { thinking: thinkingOption }),
             },
           },
         });

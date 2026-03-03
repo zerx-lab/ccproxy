@@ -129,6 +129,16 @@ export interface ResponsesAPIResponse {
 }
 
 // ============ OpenAI Chat Completions 类型 ============
+export interface ResponseFormat {
+  type: "text" | "json_object" | "json_schema";
+  json_schema?: {
+    name: string;
+    description?: string;
+    schema: Record<string, any>;
+    strict?: boolean;
+  };
+}
+
 export interface ChatCompletionsRequest {
   model: string;
   messages: ChatMessage[];
@@ -143,16 +153,34 @@ export interface ChatCompletionsRequest {
   parallel_tool_calls?: boolean;
   // 缓存相关参数（OpenAI 特有，会映射到 Anthropic cacheControl）
   prompt_cache_key?: string;
-  // 预测输出参数（OpenAI 特有，Anthropic 不支持，会被忽略）
+  // 推理能力控制 → 映射到 Anthropic extended thinking
+  reasoning_effort?: "low" | "medium" | "high";
+  // 响应格式控制 → 通过 system prompt 注入实现部分支持
+  response_format?: ResponseFormat;
+  // 流式响应选项 → include_usage 支持发送 usage chunk
+  stream_options?: { include_usage?: boolean };
+  // 用户标识（接受但忽略）
+  user?: string;
+  // 以下参数 Anthropic 不支持，会被忽略
+  n?: number;
+  seed?: number;
+  logprobs?: boolean;
+  top_logprobs?: number;
+  presence_penalty?: number;
+  frequency_penalty?: number;
+  logit_bias?: Record<string, number>;
+  web_search_options?: Record<string, any>;
   prediction?: {
     type: "content";
     content: string;
   };
+  store?: boolean;
+  service_tier?: string;
   [key: string]: any;
 }
 
 export interface ChatMessage {
-  role: "system" | "user" | "assistant" | "tool";
+  role: "system" | "user" | "assistant" | "tool" | "developer";
   content: string | ChatMessageContent[];
   tool_call_id?: string;
   tool_calls?: ToolCall[];

@@ -32,8 +32,8 @@ export function convertChatMessagesToAISDK(messages: any[]): {
   // 第二遍：转换消息
   for (const msg of messages) {
     try {
-      // 处理 system 消息
-      if (msg.role === "system") {
+      // 处理 system/developer 消息（OpenAI developer role 等同于 system）
+      if (msg.role === "system" || msg.role === "developer") {
         const text =
           typeof msg.content === "string"
             ? msg.content

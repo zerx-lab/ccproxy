@@ -80,12 +80,44 @@ export function createChatCompletionsHandler(
         temperature,
         top_p,
         parallel_tool_calls,
-        prompt_cache_key, // OpenAI 缓存参数，映射到 Anthropic cacheControl
+        prompt_cache_key,      // 映射到 Anthropic cacheControl
+        reasoning_effort,      // 映射到 Anthropic extended thinking
+        response_format,       // 通过 system prompt 注入实现部分支持
+        stream_options,        // include_usage → 发送 usage SSE chunk
+        // 以下参数接受但不使用（Anthropic 不支持，保持 API 兼容性）
+        user: _user,
+        n: _n,
+        seed: _seed,
+        logprobs: _logprobs,
+        top_logprobs: _topLogprobs,
+        presence_penalty: _presencePenalty,
+        frequency_penalty: _frequencyPenalty,
+        logit_bias: _logitBias,
+        web_search_options: _webSearchOptions,
+        prediction: _prediction,
+        store: _store,
+        service_tier: _serviceTier,
         ...rest
       } = body;
 
-      // 转换消息格式（处理 system、tool 消息、tool_calls）
-      const { messages, system } = convertChatMessagesToAISDK(openaiMessages);
+      // 转换消息格式（处理 system、tool 消息、tool_calls，developer role → system）
+      const { messages, system: rawSystem } = convertChatMessagesToAISDK(openaiMessages);
+
+      // 根据 response_format 向 system 注入 JSON 格式指令
+      let system = rawSystem;
+      if (response_format?.type === "json_object") {
+        const instruction =
+          "Respond with a valid JSON object only. Do not include any text, markdown, or explanation outside the JSON.";
+        system = system ? `${system}\n\n${instruction}` : instruction;
+      } else if (response_format?.type === "json_schema" && response_format.json_schema) {
+        const { name, schema } = response_format.json_schema;
+        const schemaStr = JSON.stringify(schema, null, 2);
+        const instruction =
+          schemaStr.length <= 2000
+            ? `Respond with JSON matching this schema (${name}):\n\`\`\`json\n${schemaStr}\n\`\`\``
+            : `Respond with valid JSON conforming to the "${name}" schema.`;
+        system = system ? `${system}\n\n${instruction}` : instruction;
+      }
 
       // 调试日志：显示转换后的消息格式
       console.log(
@@ -184,8 +216,24 @@ export function createChatCompletionsHandler(
         });
       }
 
+      // 映射 reasoning_effort → Anthropic extended thinking
+      const thinkingOption = reasoning_effort
+        ? {
+            type: "enabled" as const,
+            budgetTokens:
+              reasoning_effort === "low" ? 4096
+              : reasoning_effort === "medium" ? 10000
+              : 20000, // high
+          }
+        : undefined;
+
       // 构建 AI SDK 参数
-      const maxTokens = max_completion_tokens || max_tokens;
+      // 当 thinking 启用时，若未指定 maxTokens，自动设置足够大的值（budgetTokens + 4096）
+      const baseMaxTokens = max_completion_tokens || max_tokens;
+      const maxTokens =
+        thinkingOption && !baseMaxTokens
+          ? thinkingOption.budgetTokens + 4096
+          : baseMaxTokens;
       const stopSequences = stop
         ? Array.isArray(stop)
           ? stop
@@ -249,15 +297,15 @@ export function createChatCompletionsHandler(
             providerOptions: {
               anthropic: {
                 // parallel_tool_calls: true (OpenAI) -> disableParallelToolUse: false (Anthropic)
-                // parallel_tool_calls: false (OpenAI) -> disableParallelToolUse: true (Anthropic)
                 ...(parallel_tool_calls !== undefined && {
                   disableParallelToolUse: !parallel_tool_calls,
                 }),
-                // 当有 prompt_cache_key 时，启用 Anthropic 缓存
-                // 注意：OpenAI 和 Anthropic 的缓存机制不同，这是一个近似映射
+                // prompt_cache_key → Anthropic cacheControl
                 ...(prompt_cache_key && {
                   cacheControl: { type: "ephemeral" as const },
                 }),
+                // reasoning_effort → Anthropic extended thinking
+                ...(thinkingOption && { thinking: thinkingOption }),
               },
             },
             // 添加 onError 回调来捕获流式错误（AI SDK 6.x 会抑制错误以防止服务器崩溃）
@@ -428,21 +476,45 @@ export function createChatCompletionsHandler(
                 updateTrace(trace, { output: streamOutput });
               }
 
+              // 收集 usage（Langfuse 和 stream_options.include_usage 共用）
+              let streamUsage: any = null;
+              if (generation || stream_options?.include_usage) {
+                streamUsage = await result.usage;
+              }
+
               if (generation) {
-                const usage = await result.usage;
                 // AI SDK v6 使用 inputTokens/outputTokens 而不是 promptTokens/completionTokens
                 endGeneration({
                   generation,
                   output: streamOutput,
                   usage: {
-                    promptTokens: (usage as any)?.inputTokens || 0,
-                    completionTokens: (usage as any)?.outputTokens || 0,
-                    totalTokens: (usage as any)?.totalTokens || 0,
+                    promptTokens: (streamUsage as any)?.inputTokens || 0,
+                    completionTokens: (streamUsage as any)?.outputTokens || 0,
+                    totalTokens: (streamUsage as any)?.totalTokens || 0,
                   },
                   level: streamError ? "ERROR" : "DEFAULT",
                   statusMessage: streamError?.message,
                 });
                 flushLangfuse();
+              }
+
+              // stream_options.include_usage → 发送 usage SSE chunk（OpenAI 兼容）
+              if (stream_options?.include_usage && streamUsage) {
+                const usageChunk = {
+                  id: chatId,
+                  object: "chat.completion.chunk",
+                  created,
+                  model: modelId,
+                  choices: [],
+                  usage: {
+                    prompt_tokens: (streamUsage as any)?.inputTokens || 0,
+                    completion_tokens: (streamUsage as any)?.outputTokens || 0,
+                    total_tokens: (streamUsage as any)?.totalTokens || 0,
+                  },
+                };
+                controller.enqueue(
+                  encoder.encode(`data: ${JSON.stringify(usageChunk)}\n\n`),
+                );
               }
 
               // 结束会话跟踪
@@ -505,6 +577,7 @@ export function createChatCompletionsHandler(
               ...(prompt_cache_key && {
                 cacheControl: { type: "ephemeral" as const },
               }),
+              ...(thinkingOption && { thinking: thinkingOption }),
             },
           },
         });
