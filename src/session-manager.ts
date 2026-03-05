@@ -44,8 +44,11 @@ interface SessionManagerConfig {
 const DEFAULT_CONFIG: SessionManagerConfig = {
   dedupeWindowMs: 2000,
   requestTimeoutMs: 300000,
-  enableDedupe: true,
-  enableBusyCheck: true,
+  // 作为代理服务器，不同客户端的请求可能产生相同的 session ID（第一条消息内容相同），
+  // 开启这两个检测会导致合法的并发请求被错误拒绝（返回 429），
+  // 因此默认禁用。
+  enableDedupe: false,
+  enableBusyCheck: false,
 };
 
 /**
