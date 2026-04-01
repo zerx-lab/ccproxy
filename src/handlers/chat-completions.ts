@@ -56,7 +56,9 @@ export function createChatCompletionsHandler(
       const requestStatus = sessionManager.startRequest(sessionId, body);
 
       if (!requestStatus.accepted) {
-        console.warn(`[chat-completions] Request rejected: ${requestStatus.reason}`);
+        console.warn(
+          `[chat-completions] Request rejected: ${requestStatus.reason}`,
+        );
         return c.json(
           {
             error: {
@@ -64,7 +66,7 @@ export function createChatCompletionsHandler(
               type: "rate_limit_error",
             },
           },
-          429
+          429,
         );
       }
       logRequest(endpoint, "POST", body);
@@ -80,10 +82,10 @@ export function createChatCompletionsHandler(
         temperature,
         top_p,
         parallel_tool_calls,
-        prompt_cache_key,      // 映射到 Anthropic cacheControl
-        reasoning_effort,      // 映射到 Anthropic extended thinking
-        response_format,       // 通过 system prompt 注入实现部分支持
-        stream_options,        // include_usage → 发送 usage SSE chunk
+        prompt_cache_key, // 映射到 Anthropic cacheControl
+        reasoning_effort, // 映射到 Anthropic extended thinking
+        response_format, // 通过 system prompt 注入实现部分支持
+        stream_options, // include_usage → 发送 usage SSE chunk
         // 以下参数接受但不使用（Anthropic 不支持，保持 API 兼容性）
         user: _user,
         n: _n,
@@ -101,7 +103,8 @@ export function createChatCompletionsHandler(
       } = body;
 
       // 转换消息格式（处理 system、tool 消息、tool_calls，developer role → system）
-      const { messages, system: rawSystem } = convertChatMessagesToAISDK(openaiMessages);
+      const { messages, system: rawSystem } =
+        convertChatMessagesToAISDK(openaiMessages);
 
       // 根据 response_format 向 system 注入 JSON 格式指令
       let system = rawSystem;
@@ -109,7 +112,10 @@ export function createChatCompletionsHandler(
         const instruction =
           "Respond with a valid JSON object only. Do not include any text, markdown, or explanation outside the JSON.";
         system = system ? `${system}\n\n${instruction}` : instruction;
-      } else if (response_format?.type === "json_schema" && response_format.json_schema) {
+      } else if (
+        response_format?.type === "json_schema" &&
+        response_format.json_schema
+      ) {
         const { name, schema } = response_format.json_schema;
         const schemaStr = JSON.stringify(schema, null, 2);
         const instruction =
@@ -221,9 +227,11 @@ export function createChatCompletionsHandler(
         ? {
             type: "enabled" as const,
             budgetTokens:
-              reasoning_effort === "low" ? 4096
-              : reasoning_effort === "medium" ? 10000
-              : 20000, // high
+              reasoning_effort === "low"
+                ? 4096
+                : reasoning_effort === "medium"
+                  ? 10000
+                  : 20000, // high
           }
         : undefined;
 
@@ -285,6 +293,7 @@ export function createChatCompletionsHandler(
         try {
           result = streamText({
             model: anthropic(modelId),
+            maxRetries: 0, // 禁用 AI SDK 内置重试，由客户端决定是否重试
             messages,
             system,
             tools: aiSdkTools,
@@ -345,7 +354,8 @@ export function createChatCompletionsHandler(
               for await (const part of result.fullStream) {
                 if (part.type === "text-delta") {
                   // 文本增量 - AI SDK 6.x 使用 'text' 而不是 'textDelta'
-                  const textContent = (part as any).text || (part as any).textDelta;
+                  const textContent =
+                    (part as any).text || (part as any).textDelta;
                   // 收集完整的响应文本
                   fullResponseText += textContent || "";
                   const data = {
@@ -560,6 +570,7 @@ export function createChatCompletionsHandler(
         // 非流式响应
         const result = streamText({
           model: anthropic(modelId),
+          maxRetries: 0, // 禁用 AI SDK 内置重试，由客户端决定是否重试
           messages,
           system,
           tools: aiSdkTools,
@@ -669,9 +680,12 @@ export function createChatCompletionsHandler(
       if (generation) {
         endGeneration({
           generation,
-          output: { error: error instanceof Error ? error.message : "Unknown error" },
+          output: {
+            error: error instanceof Error ? error.message : "Unknown error",
+          },
           level: "ERROR",
-          statusMessage: error instanceof Error ? error.message : "Unknown error",
+          statusMessage:
+            error instanceof Error ? error.message : "Unknown error",
         });
         flushLangfuse();
       }

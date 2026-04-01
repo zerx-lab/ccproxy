@@ -65,7 +65,7 @@ export function createResponsesHandler(
               message: requestStatus.reason,
             },
           },
-          429
+          429,
         );
       }
       logRequest(endpoint, "POST", body);
@@ -77,7 +77,7 @@ export function createResponsesHandler(
         stream = false,
         parallel_tool_calls,
         prompt_cache_key, // 缓存参数
-        reasoning,        // 映射到 Anthropic extended thinking
+        reasoning, // 映射到 Anthropic extended thinking
         ...rest
       } = body;
 
@@ -89,17 +89,21 @@ export function createResponsesHandler(
         ? {
             type: "enabled" as const,
             budgetTokens:
-              reasoning.effort === "minimal" ? 2048
-              : reasoning.effort === "low" ? 4096
-              : reasoning.effort === "medium" ? 10000
-              : 20000, // high
+              reasoning.effort === "minimal"
+                ? 2048
+                : reasoning.effort === "low"
+                  ? 4096
+                  : reasoning.effort === "medium"
+                    ? 10000
+                    : 20000, // high
           }
         : undefined;
 
       // 当 thinking 启用时确保 maxOutputTokens 足够大
       const baseMaxOutput = rest.max_output_tokens;
       const effectiveMaxOutput =
-        thinkingOption && (!baseMaxOutput || baseMaxOutput <= thinkingOption.budgetTokens)
+        thinkingOption &&
+        (!baseMaxOutput || baseMaxOutput <= thinkingOption.budgetTokens)
           ? thinkingOption.budgetTokens + 4096
           : baseMaxOutput || 8192;
 
@@ -253,6 +257,7 @@ export function createResponsesHandler(
         try {
           result = streamText({
             model: anthropic(modelId),
+            maxRetries: 0, // 禁用 AI SDK 内置重试，由客户端决定是否重试
             messages,
             system,
             tools: aiSdkTools,
@@ -635,6 +640,7 @@ export function createResponsesHandler(
         // 非流式响应
         const result = streamText({
           model: anthropic(modelId),
+          maxRetries: 0, // 禁用 AI SDK 内置重试，由客户端决定是否重试
           messages,
           system,
           tools: aiSdkTools,
@@ -761,9 +767,12 @@ export function createResponsesHandler(
       if (generation) {
         endGeneration({
           generation,
-          output: { error: error instanceof Error ? error.message : "Unknown error" },
+          output: {
+            error: error instanceof Error ? error.message : "Unknown error",
+          },
           level: "ERROR",
-          statusMessage: error instanceof Error ? error.message : "Unknown error",
+          statusMessage:
+            error instanceof Error ? error.message : "Unknown error",
         });
         flushLangfuse();
       }

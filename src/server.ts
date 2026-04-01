@@ -42,7 +42,7 @@ export async function startServer(options: ProxyOptions) {
   const auth = await loadAuth();
   if (!auth) {
     console.error(
-      "Error: Not authenticated. Please run 'ccproxy login' first."
+      "Error: Not authenticated. Please run 'ccproxy login' first.",
     );
     process.exit(1);
   }
@@ -53,13 +53,19 @@ export async function startServer(options: ProxyOptions) {
   // 注册配置变更回调
   onConfigChange((config: Config) => {
     modelMapping = config.modelMapping;
-    console.log(`[${new Date().toISOString()}] Model mapping updated:`, Object.keys(modelMapping).length, "mappings");
+    console.log(
+      `[${new Date().toISOString()}] Model mapping updated:`,
+      Object.keys(modelMapping).length,
+      "mappings",
+    );
   });
 
   // 注册 API Key 变更回调
   onApiKeyChange((apiKey) => {
     apiKeyRequired = apiKey !== null;
-    console.log(`[${new Date().toISOString()}] API Key authentication: ${apiKeyRequired ? "ENABLED" : "DISABLED"}`);
+    console.log(
+      `[${new Date().toISOString()}] API Key authentication: ${apiKeyRequired ? "ENABLED" : "DISABLED"}`,
+    );
   });
 
   const app = new Hono();
@@ -100,7 +106,9 @@ export async function startServer(options: ProxyOptions) {
   console.log(`  - GET  /health`);
   console.log(`Logs directory: ${getLogDir()}`);
   console.log(`Hot reload: ENABLED (config files are watched)`);
-  console.log(`Langfuse tracing: ${isLangfuseEnabled() ? "ENABLED" : "DISABLED"}`);
+  console.log(
+    `Langfuse tracing: ${isLangfuseEnabled() ? "ENABLED" : "DISABLED"}`,
+  );
 
   // 处理进程退出
   const cleanup = async () => {
@@ -117,5 +125,9 @@ export async function startServer(options: ProxyOptions) {
     fetch: app.fetch,
     port,
     hostname: host,
+    serverOptions: {
+      requestTimeout: 0, // 禁用 Node.js 默认的 5 分钟请求超时，避免长时间 AI 流式响应被中断
+      headersTimeout: 0, // 禁用 Node.js 默认的 1 分钟 headers 超时
+    },
   });
 }

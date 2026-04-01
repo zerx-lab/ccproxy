@@ -8,12 +8,9 @@ import {
   CLAUDE_CODE_SYSTEM_PROMPT,
   CLAUDE_CODE_HEADERS,
   DEFAULT_CLAUDE_CODE_TOOL,
-  REQUEST_TIMEOUT,
 } from "../constants";
 import { writeLog } from "../logger";
 import { forceRefreshAccessToken } from "../auth";
-
-const MAX_RETRIES = 3;
 
 /** 请求处理选项 */
 export interface ProcessRequestOptions {
@@ -208,7 +205,59 @@ export function processClaudeCodeRequestBody(
     });
   }
 
+  // 4. 强制限制 cache_control 块总数不超过 4（Anthropic API 限制）
+  // opencode 客户端可能已经打了 cache_control，加上代理添加的会超出限制
+  if (opts.enablePromptCache) {
+    enforceCacheControlLimit(parsed, 4);
+  }
+
   return parsed;
+}
+
+/**
+ * 强制限制请求体中 cache_control 块的总数，超出部分从最早的位置移除
+ * 顺序：system blocks → tools → messages（越早越先移除）
+ */
+function enforceCacheControlLimit(parsed: any, maxBlocks: number): void {
+  // 收集所有带 cache_control 的位置（按优先级从低到高排列，低优先级先移除）
+  const positions: Array<{ remove: () => void }> = [];
+
+  // system blocks（最低优先级）
+  if (Array.isArray(parsed.system)) {
+    for (const block of parsed.system) {
+      if (block?.cache_control) {
+        positions.push({ remove: () => delete block.cache_control });
+      }
+    }
+  }
+
+  // tools（次低优先级）
+  if (Array.isArray(parsed.tools)) {
+    for (const tool of parsed.tools) {
+      if (tool?.cache_control) {
+        positions.push({ remove: () => delete tool.cache_control });
+      }
+    }
+  }
+
+  // messages（最高优先级，最后移除）
+  if (Array.isArray(parsed.messages)) {
+    for (const msg of parsed.messages) {
+      if (Array.isArray(msg?.content)) {
+        for (const block of msg.content) {
+          if (block?.cache_control) {
+            positions.push({ remove: () => delete block.cache_control });
+          }
+        }
+      }
+    }
+  }
+
+  // 从低优先级开始移除，直到总数 <= maxBlocks
+  const excess = positions.length - maxBlocks;
+  for (let i = 0; i < excess; i++) {
+    positions[i].remove();
+  }
 }
 
 /**
@@ -219,7 +268,8 @@ export function removeToolPrefixFromResponse(text: string): string {
 }
 
 /**
- * 发送 Claude Code API 请求（带 401 重试逻辑，类似 opencode）
+ * 发送 Claude Code API 请求
+ * 纯透传代理：无超时、无重试，仅在 401 时刷新 token 并重试一次
  */
 export async function sendClaudeCodeRequest(
   accessToken: string,
@@ -232,14 +282,9 @@ export async function sendClaudeCodeRequest(
   // 注意：调用方应该已经使用 processClaudeCodeRequestBody 处理过 body
   // 这里不再重复处理，只负责发送请求
   const bodyStr = JSON.stringify(body);
-
   let currentToken = accessToken;
-  let attempts = 0;
 
-  while (attempts < MAX_RETRIES) {
-    attempts++;
-
-    // 记录发送给 Anthropic API 的实际请求
+  const doFetch = async (token: string): Promise<Response> => {
     writeLog({
       timestamp: new Date().toISOString(),
       type: "request",
@@ -249,128 +294,86 @@ export async function sendClaudeCodeRequest(
         url: url.toString(),
         bodySize: bodyStr.length,
         headers: CLAUDE_CODE_HEADERS,
-        attempt: attempts,
       },
     });
 
     console.log(
-      `[${new Date().toISOString()}] Sending request to Anthropic API (body size: ${bodyStr.length} bytes, attempt ${attempts}/${MAX_RETRIES})`,
+      `[${new Date().toISOString()}] Sending request to Anthropic API (body size: ${bodyStr.length} bytes)`,
     );
 
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+    const response = await fetch(url.toString(), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        authorization: `Bearer ${token}`,
+        ...CLAUDE_CODE_HEADERS,
+      },
+      body: bodyStr,
+    });
 
-      const response = await fetch(url.toString(), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          authorization: `Bearer ${currentToken}`,
-          ...CLAUDE_CODE_HEADERS,
-        },
-        body: bodyStr,
-        signal: controller.signal,
-      });
+    writeLog({
+      timestamp: new Date().toISOString(),
+      type: "response",
+      endpoint: "anthropic:/v1/messages",
+      method: "POST",
+      data: {
+        status: response.status,
+        statusText: response.statusText,
+      },
+    });
 
-      clearTimeout(timeoutId);
+    console.log(
+      `[${new Date().toISOString()}] Anthropic API response: ${response.status} ${response.statusText}`,
+    );
 
-      // 记录 Anthropic API 的响应状态
-      writeLog({
-        timestamp: new Date().toISOString(),
-        type: "response",
-        endpoint: "anthropic:/v1/messages",
-        method: "POST",
-        data: {
-          status: response.status,
-          statusText: response.statusText,
-          attempt: attempts,
-        },
-      });
+    return response;
+  };
 
+  try {
+    const response = await doFetch(currentToken);
+
+    // 401：刷新 token 后重试一次（被动刷新策略）
+    if (response.status === 401) {
       console.log(
-        `[${new Date().toISOString()}] Anthropic API response: ${response.status} ${response.statusText}`,
+        `[${new Date().toISOString()}] Received 401, attempting to refresh token...`,
       );
-
-      // 检查是否需要刷新 token（401 错误）
-      if (response.status === 401) {
+      const newToken = await forceRefreshAccessToken();
+      if (newToken) {
         console.log(
-          `[${new Date().toISOString()}] Received 401, attempting to refresh token...`,
+          `[${new Date().toISOString()}] Token refreshed, retrying request...`,
         );
-
-        const newToken = await forceRefreshAccessToken();
-        if (newToken) {
-          currentToken = newToken;
-          console.log(
-            `[${new Date().toISOString()}] Token refreshed, retrying request...`,
-          );
-          continue; // 使用新 token 重试
-        } else {
-          console.error(
-            `[${new Date().toISOString()}] Failed to refresh token, returning 401 response`,
-          );
-          return response; // 刷新失败，返回原始 401 响应
-        }
-      }
-
-      // 检查是否需要重试（429 或 529 错误）
-      if (response.status === 429 || response.status === 529) {
-        const retryAfter = response.headers.get("retry-after");
-        // 使用 parseFloat 而非 parseInt，正确处理小数秒（如 "0.5"）
-        // 同时设置上限 60s，避免因异常 retry-after 值导致超长等待
-        const retryAfterMs = retryAfter
-          ? Math.min(parseFloat(retryAfter) * 1000, 60000)
-          : 2000 * (1 << (attempts - 1));
-        const waitMs = Math.max(retryAfterMs, 500); // 最少等 500ms
-
-        console.log(
-          `[${new Date().toISOString()}] Rate limited (${response.status}), waiting ${waitMs}ms before retry (retry-after: ${retryAfter ?? "none"})...`,
+        return await doFetch(newToken);
+      } else {
+        console.error(
+          `[${new Date().toISOString()}] Failed to refresh token, returning 401 response`,
         );
-
-        await new Promise((resolve) => setTimeout(resolve, waitMs));
-        continue;
+        return response;
       }
-
-      return response;
-    } catch (error) {
-      // 记录错误详情
-      writeLog({
-        timestamp: new Date().toISOString(),
-        type: "error",
-        endpoint: "anthropic:/v1/messages",
-        method: "POST",
-        data: {
-          message: error instanceof Error ? error.message : String(error),
-          name: error instanceof Error ? error.name : "Unknown",
-          code: (error as any).code,
-          attempt: attempts,
-        },
-      });
-
-      console.error(
-        `[${new Date().toISOString()}] Anthropic API error (attempt ${attempts}/${MAX_RETRIES}):`,
-        error,
-      );
-
-      // 如果还有重试机会，等待后重试
-      if (attempts < MAX_RETRIES) {
-        const waitMs = 2000 * (1 << (attempts - 1));
-        console.log(
-          `[${new Date().toISOString()}] Waiting ${waitMs}ms before retry...`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, waitMs));
-        continue;
-      }
-
-      throw error;
     }
-  }
 
-  // 不应该到达这里，但为了类型安全
-  throw new Error(`Maximum retry attempts (${MAX_RETRIES}) reached`);
+    return response;
+  } catch (error) {
+    writeLog({
+      timestamp: new Date().toISOString(),
+      type: "error",
+      endpoint: "anthropic:/v1/messages",
+      method: "POST",
+      data: {
+        message: error instanceof Error ? error.message : String(error),
+        name: error instanceof Error ? error.name : "Unknown",
+        code: (error as any).code,
+      },
+    });
+
+    console.error(`[${new Date().toISOString()}] Anthropic API error:`, error);
+
+    throw error;
+  }
 }
 
 /**
- * 创建自定义的 Anthropic fetch 函数，用于处理 OAuth 认证（带 401 重试逻辑，类似 opencode）
+ * 创建自定义的 Anthropic fetch 函数，用于处理 OAuth 认证
+ * 纯透传代理：无超时、无重试，仅在 401 时刷新 token 并重试一次，429/529 直接返回响应
  * @param getAccessToken - 获取访问令牌的函数
  * @param options - 请求处理选项
  */
@@ -378,11 +381,9 @@ export function createAuthenticatedFetch(
   getAccessToken: () => Promise<string | null>,
   options: ProcessRequestOptions = {},
 ) {
-  // 对于通过 AI SDK 的请求，默认不强制添加 placeholder 工具
-  // 因为 AI SDK 会自己管理工具
   const processOptions: ProcessRequestOptions = {
     enablePromptCache: true,
-    forceAddPlaceholderTool: false, // AI SDK 请求不需要 placeholder
+    forceAddPlaceholderTool: false,
     ...options,
   };
 
@@ -434,96 +435,73 @@ export function createAuthenticatedFetch(
       // ignore URL errors
     }
 
-    let attempts = 0;
-
-    while (attempts < MAX_RETRIES) {
-      attempts++;
-
-      const requestHeaders = new Headers(requestInit.headers);
-
-      // 设置认证 headers（每次循环都重新设置，因为 token 可能已刷新）
-      requestHeaders.set("authorization", `Bearer ${accessToken}`);
+    const buildHeaders = (token: string): Headers => {
+      const headers = new Headers(requestInit.headers);
+      headers.set("authorization", `Bearer ${token}`);
       Object.entries(CLAUDE_CODE_HEADERS).forEach(([key, value]) => {
-        requestHeaders.set(key, value);
+        headers.set(key, value);
       });
-      requestHeaders.delete("x-api-key");
+      headers.delete("x-api-key");
+      return headers;
+    };
 
+    const doFetch = async (token: string): Promise<Response> => {
       const response = await fetch(requestInput, {
         ...requestInit,
         body,
-        headers: requestHeaders,
+        headers: buildHeaders(token),
+      });
+      return response;
+    };
+
+    const wrapResponse = (response: Response): Response => {
+      if (!response.body) return response;
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      const encoder = new TextEncoder();
+
+      const stream = new ReadableStream({
+        async pull(controller) {
+          const { done, value } = await reader.read();
+          if (done) {
+            controller.close();
+            return;
+          }
+          let text = decoder.decode(value, { stream: true });
+          text = removeToolPrefixFromResponse(text);
+          controller.enqueue(encoder.encode(text));
+        },
       });
 
-      // 检查是否需要刷新 token（401 错误）
-      if (response.status === 401) {
+      return new Response(stream, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    };
+
+    const response = await doFetch(accessToken);
+
+    // 401：刷新 token 后重试一次（被动刷新策略）
+    if (response.status === 401) {
+      console.log(
+        `[${new Date().toISOString()}] Received 401 in authenticated fetch, attempting to refresh token...`,
+      );
+      const newToken = await forceRefreshAccessToken();
+      if (newToken) {
         console.log(
-          `[${new Date().toISOString()}] Received 401 in authenticated fetch, attempting to refresh token...`,
+          `[${new Date().toISOString()}] Token refreshed, retrying request...`,
         );
-
-        const newToken = await forceRefreshAccessToken();
-        if (newToken) {
-          accessToken = newToken;
-          console.log(
-            `[${new Date().toISOString()}] Token refreshed, retrying request...`,
-          );
-          continue; // 使用新 token 重试
-        } else {
-          console.error(
-            `[${new Date().toISOString()}] Failed to refresh token, returning 401 response`,
-          );
-          return response; // 刷新失败，返回原始 401 响应
-        }
-      }
-
-      // 检查是否需要重试（429 或 529 错误）
-      if (response.status === 429 || response.status === 529) {
-        const retryAfter = response.headers.get("retry-after");
-        // 使用 parseFloat 而非 parseInt，正确处理小数秒（如 "0.5"）
-        // 同时设置上限 60s，避免因异常 retry-after 值导致超长等待
-        const retryAfterMs = retryAfter
-          ? Math.min(parseFloat(retryAfter) * 1000, 60000)
-          : 2000 * (1 << (attempts - 1));
-        const waitMs = Math.max(retryAfterMs, 500); // 最少等 500ms
-
-        console.log(
-          `[${new Date().toISOString()}] Rate limited (${response.status}), waiting ${waitMs}ms before retry (retry-after: ${retryAfter ?? "none"})...`,
+        return wrapResponse(await doFetch(newToken));
+      } else {
+        console.error(
+          `[${new Date().toISOString()}] Failed to refresh token, returning 401 response`,
         );
-
-        await new Promise((resolve) => setTimeout(resolve, waitMs));
-        continue;
+        return response;
       }
-
-      // 转换响应中的工具名称（移除 mcp_ 前缀）
-      if (response.body) {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        const encoder = new TextEncoder();
-
-        const stream = new ReadableStream({
-          async pull(controller) {
-            const { done, value } = await reader.read();
-            if (done) {
-              controller.close();
-              return;
-            }
-
-            let text = decoder.decode(value, { stream: true });
-            text = removeToolPrefixFromResponse(text);
-            controller.enqueue(encoder.encode(text));
-          },
-        });
-
-        return new Response(stream, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: response.headers,
-        });
-      }
-
-      return response;
     }
 
-    // 不应该到达这里，但为了类型安全
-    throw new Error(`Maximum retry attempts (${MAX_RETRIES}) reached`);
+    return wrapResponse(response);
   };
 }
